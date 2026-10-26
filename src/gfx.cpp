@@ -2,6 +2,23 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <algorithm>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "../third_party/stb_truetype.h"
+#pragma GCC diagnostic pop
+#include "fonts_data.h"
+
+struct Gfx::Atlas {
+    SDL_Texture* tex = nullptr;
+    stbtt_packedchar pc[95];
+    float cap = 0;      // capital height in pixels at this size
+    float ascent = 0;
+};
+
 
 Col mix(Col a, Col b, float t) {
     auto L = [&](uint8_t x, uint8_t y) { return (uint8_t)(x + (y - x) * t); };
@@ -48,10 +65,12 @@ static SDL_Texture* makeTex(SDL_Renderer* r, int w, int h, float (*cov)(float, f
 bool Gfx::init(SDL_Renderer* ren) {
     r = ren;
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    circ = makeTex(r, 128, 128, [](float x, float y, int w, int h) {
+    auto disc = [](float x, float y, int w, int h) {
         float dx = x - w / 2.0f, dy = y - h / 2.0f;
         return (dx * dx + dy * dy <= (w / 2.0f - 1) * (w / 2.0f - 1)) ? 1.0f : 0.0f;
-    });
+    };
+    circ = makeTex(r, 512, 512, disc);      // big shapes stay crisp
+    circSmall = makeTex(r, 64, 64, disc);   // small dots don't shimmer
     // smile arc: lower part of a ring, round ends
     arc = makeTex(r, 128, 64, [](float x, float y, int, int) {
         float cx = 64, cy = 0, R = 50, th = 11;
@@ -70,7 +89,10 @@ bool Gfx::init(SDL_Renderer* ren) {
 }
 
 void Gfx::destroy() {
+    for (auto& kv : atlases) { if (kv.second->tex) SDL_DestroyTexture(kv.second->tex); delete kv.second; }
+    atlases.clear();
     if (circ) SDL_DestroyTexture(circ);
+    if (circSmall) SDL_DestroyTexture(circSmall);
     if (arc) SDL_DestroyTexture(arc);
     circ = arc = nullptr;
 }
@@ -86,12 +108,14 @@ void Gfx::rect(float x, float y, float w, float h, Col c) {
 
 void Gfx::ellipse(float cx, float cy, float rx, float ry, Col c) {
     if (rx <= 0 || ry <= 0 || c.a == 0) return;
-    SDL_SetTextureColorMod(circ, c.r, c.g, c.b);
-    SDL_SetTextureAlphaMod(circ, c.a);
-    // texture circle has 1px transparent margin at 128px: scale a touch
-    float k = 64.0f / 63.0f;
+    bool big = std::max(rx, ry) > 20;
+    SDL_Texture* t = big ? circ : circSmall;
+    SDL_SetTextureColorMod(t, c.r, c.g, c.b);
+    SDL_SetTextureAlphaMod(t, c.a);
+    // the texture disc has a 1px transparent margin: scale a touch
+    float k = big ? 256.0f / 255.0f : 32.0f / 31.0f;
     SDL_FRect d{cx - rx * k, cy - ry * k, rx * 2 * k, ry * 2 * k};
-    SDL_RenderCopyF(r, circ, nullptr, &d);
+    SDL_RenderCopyF(r, t, nullptr, &d);
 }
 
 void Gfx::circle(float cx, float cy, float rad, Col c) { ellipse(cx, cy, rad, rad, c); }
@@ -147,90 +171,127 @@ void Gfx::line(float x1, float y1, float x2, float y2, float th, Col c) {
 }
 
 // ------------------------------------------------------------------ font
-struct Glyph { char c; const char* rows; };
-static const Glyph FONT[] = {
-    {'A'," ### #   ##   #######   ##   ##   #"},
-    {'B',"#### #   ##   ##### #   ##   ##### "},
-    {'C'," ### #   ##    #    #    #   # ### "},
-    {'D',"#### #   ##   ##   ##   ##   ##### "},
-    {'E',"######    #    #### #    #    #####"},
-    {'F',"######    #    #### #    #    #    "},
-    {'G'," ### #   ##    # ####   ##   # ####"},
-    {'H',"#   ##   ##   #######   ##   ##   #"},
-    {'I'," ###   #    #    #    #    #   ### "},
-    {'J',"  ###   #    #    #    # #  #  ##  "},
-    {'K',"#   ##  # # #  ##   # #  #  # #   #"},
-    {'L',"#    #    #    #    #    #    #####"},
-    {'M',"#   ### ### # ## # ##   ##   ##   #"},
-    {'N',"#   ##   ###  ## # ##  ###   ##   #"},
-    {'O'," ### #   ##   ##   ##   ##   # ### "},
-    {'P',"#### #   ##   ##### #    #    #    "},
-    {'Q'," ### #   ##   ##   ## # ##  #  ## #"},
-    {'R',"#### #   ##   ##### # #  #  # #   #"},
-    {'S'," #####    #     ###     #    ##### "},
-    {'T',"#####  #    #    #    #    #    #  "},
-    {'U',"#   ##   ##   ##   ##   ##   # ### "},
-    {'V',"#   ##   ##   ##   ##   # # #   #  "},
-    {'W',"#   ##   ##   ## # ## # ## # # # # "},
-    {'X',"#   ##   # # #   #   # # #   ##   #"},
-    {'Y',"#   ##   # # #   #    #    #    #  "},
-    {'Z',"#####    #   #   #   #   #    #####"},
-    {'0'," ### #   ##  ### # ###  ##   # ### "},
-    {'1',"  #   ##    #    #    #    #   ### "},
-    {'2'," ### #   #    #   #   #   #   #####"},
-    {'3',"#####   #   #     #     ##   # ### "},
-    {'4',"   #   ##  # # #  # #####   #    # "},
-    {'5',"######    ####     #    ##   # ### "},
-    {'6',"  ##  #   #    #### #   ##   # ### "},
-    {'7',"#####    #   #   #   #    #    #   "},
-    {'8'," ### #   ##   # ### #   ##   # ### "},
-    {'9'," ### #   ##   # ####    #   #  ##  "},
-    {' ',"                                   "},
-    {'.',"                          ##   ##  "},
-    {',',"                           #   #   "},
-    {'!',"  #    #    #    #    #         #  "},
-    {'?'," ### #   #    #   #   #         #  "},
-    {':',"       #              #            "},
-    {'-',"                ###                "},
-    {'+',"       #    #  #####  #    #       "},
-    {'/',"    #    #   #   #   #   #    #    "},
-    {'(',"   #   #   #    #    #     #     # "},
-    {')'," #     #     #    #    #   #   #   "},
-    {'\'',"  #    #                           "},
-    {'>'," #     #     #     #   #   #   #   "},
-    {'<',"   #   #   #   #     #     #     # "},
-    {'*',"     # # # ### ##### ### # # #     "},
-    {'_',"                              #####"},
-    {'#'," # # ##### # #  # # ##### # #      "},
-    {'%',"##   ##  #   #   #   #   #  ##   ##"},
-};
-static const char* glyph(char c) {
-    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    for (const Glyph& g : FONT) if (g.c == c) return g.rows;
-    return FONT[36].rows;
+
+static stbtt_fontinfo* fontInfo(int f) {
+    static stbtt_fontinfo info[2];
+    static bool ready[2] = {false, false};
+    if (!ready[f]) {
+        const unsigned char* d = f == F_DISPLAY ? FONT_MOCHIY : FONT_MPLUS;
+        stbtt_InitFont(&info[f], d, stbtt_GetFontOffsetForIndex(d, 0));
+        ready[f] = true;
+    }
+    return &info[f];
 }
 
-float Gfx::textWidth(const char* s, float scale) {
-    int n = (int)std::strlen(s);
-    return n ? (n * 6 - 1) * scale : 0;
+// pixel height that gives a capital height of `cap` pixels
+static float pxForCap(int f, float cap) {
+    stbtt_fontinfo* fi = fontInfo(f);
+    int x0, y0, x1, y1;
+    stbtt_GetCodepointBox(fi, 'H', &x0, &y0, &x1, &y1);
+    int asc, desc, gap;
+    stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
+    float capUnits = (float)y1;
+    float hUnits = (float)(asc - desc);
+    return cap * hUnits / capUnits;
 }
 
-float Gfx::text(float x, float y, float scale, Col c, const char* s, Align al, bool dots) {
-    float w = textWidth(s, scale);
-    if (al == AL_CENTER) x -= w / 2; else if (al == AL_RIGHT) x -= w;
-    float cx = x;
+Gfx::Atlas* Gfx::atlas(int font, float size) {
+    int key = font * 1000 + (int)std::lround(size);
+    auto it = atlases.find(key);
+    if (it != atlases.end()) return it->second;
+    Atlas* a = new Atlas();
+    float px = pxForCap(font, (float)(key % 1000));
+    const unsigned char* data = font == F_DISPLAY ? FONT_MOCHIY : FONT_MPLUS;
+    int W = 256, H = 256;
+    std::vector<unsigned char> bmp;
+    for (;;) {
+        bmp.assign((size_t)W * H, 0);
+        stbtt_pack_context pc{};
+        stbtt_PackBegin(&pc, bmp.data(), W, H, 0, 2, nullptr);
+        stbtt_PackSetOversampling(&pc, px < 40 ? 2 : 1, px < 40 ? 2 : 1);
+        int ok = stbtt_PackFontRange(&pc, data, 0, px, 32, 95, a->pc);
+        stbtt_PackEnd(&pc);
+        if (ok) break;
+        if (W <= H) W *= 2; else H *= 2;
+        if (W > 4096) break;
+    }
+    std::vector<uint32_t> px32((size_t)W * H);
+    for (size_t i = 0; i < px32.size(); ++i) px32[i] = ((uint32_t)bmp[i] << 24) | 0x00ffffffu;
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormatFrom(px32.data(), W, H, 32, W * 4, SDL_PIXELFORMAT_ARGB8888);
+    a->tex = SDL_CreateTextureFromSurface(r, s);
+    SDL_FreeSurface(s);
+    SDL_SetTextureBlendMode(a->tex, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(a->tex, SDL_ScaleModeLinear);
+    stbtt_fontinfo* fi = fontInfo(font);
+    float sc = stbtt_ScaleForPixelHeight(fi, px);
+    int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
+    int x0, y0, x1, y1; stbtt_GetCodepointBox(fi, 'H', &x0, &y0, &x1, &y1);
+    a->ascent = asc * sc;
+    a->cap = y1 * sc;
+    atlases[key] = a;
+    return a;
+}
+
+float Gfx::measure(const char* s, float size, int font) {
+    Atlas* a = atlas(font, size);
+    float w = 0;
     for (const char* p = s; *p; ++p) {
-        const char* g = glyph(*p);
-        for (int row = 0; row < 7; ++row)
-            for (int col = 0; col < 5; ++col)
-                if (g[row * 5 + col] == '#') {
-                    float px = cx + col * scale, py = y + row * scale;
-                    if (dots) circle(px + scale / 2, py + scale / 2, scale * 0.62f, c);
-                    else rect(px, py, scale, scale, c);
-                }
-        cx += 6 * scale;
+        int c = (unsigned char)*p;
+        if (c < 32 || c > 126) c = '?';
+        w += a->pc[c - 32].xadvance;
     }
     return w;
+}
+
+void Gfx::run(Atlas* a, float x, float y, const char* s, Col c) {
+    SDL_SetTextureColorMod(a->tex, c.r, c.g, c.b);
+    SDL_SetTextureAlphaMod(a->tex, c.a);
+    float cx = x, cy = y + a->cap;    // baseline
+    int tw, th; SDL_QueryTexture(a->tex, nullptr, nullptr, &tw, &th);
+    for (const char* p = s; *p; ++p) {
+        int ch = (unsigned char)*p;
+        if (ch < 32 || ch > 126) ch = '?';
+        stbtt_aligned_quad q;
+        stbtt_GetPackedQuad(a->pc, tw, th, ch - 32, &cx, &cy, &q, 0);
+        if (ch == ' ') continue;
+        SDL_Rect src{(int)std::lround(q.s0 * tw), (int)std::lround(q.t0 * th),
+                     (int)std::lround((q.s1 - q.s0) * tw), (int)std::lround((q.t1 - q.t0) * th)};
+        SDL_FRect dst{q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0};
+        SDL_RenderCopyF(r, a->tex, &src, &dst);
+    }
+}
+
+float Gfx::print(float x, float y, float size, const TextStyle& st, const char* s, Align al) {
+    if (!s || !*s) return 0;
+    Atlas* a = atlas(st.font, size);
+    float w = measure(s, size, st.font);
+    if (al == AL_CENTER) x -= w / 2; else if (al == AL_RIGHT) x -= w;
+    auto ring = [&](float ox, float oy, Col c) {
+        float R = st.outlineW;
+        int n = std::max(8, (int)std::ceil(6.2832f * R / 1.4f));
+        for (int i = 0; i < n; ++i) {
+            float an = 6.2832f * i / n;
+            run(a, x + ox + std::cos(an) * R, y + oy + std::sin(an) * R, s, c);
+        }
+        if (R > 2.5f)
+            for (int i = 0; i < 8; ++i) {
+                float an = 6.2832f * i / 8 + 0.39f;
+                run(a, x + ox + std::cos(an) * R * 0.55f, y + oy + std::sin(an) * R * 0.55f, s, c);
+            }
+    };
+    if (st.outline.a && st.outlineW > 0) {
+        if (st.shadow > 0) ring(0, st.shadow, st.outline);
+        ring(0, 0, st.outline);
+    } else if (st.shadow > 0) {
+        run(a, x, y + st.shadow, s, st.outline.a ? st.outline : Col{0, 0, 0, 120});
+    }
+    run(a, x, y, s, st.fill);
+    return w;
+}
+
+float Gfx::text(float x, float y, float size, Col c, const char* s, Align al, int font) {
+    TextStyle st; st.font = font; st.fill = c;
+    return print(x, y, size, st, s, al);
 }
 
 // ------------------------------------------------------------------ slime
@@ -240,7 +301,7 @@ void Gfx::slime(float cx, float by, float w, Col body, Col ink, float squash, fl
     float sx = s * (1.0f + squash * 0.18f), sy = s * (1.0f - squash * 0.18f);
     auto X = [&](float vx) { return cx + (vx - 100) * sx; };
     auto Y = [&](float vy) { return by + (vy - 164) * sy; };
-    float o = 4.5f * s;
+    float o = 8.0f * s;
     // ink outline (expanded body), then body
     for (int pass = 0; pass < 2; ++pass) {
         float e = pass == 0 ? o : 0;

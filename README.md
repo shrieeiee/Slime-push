@@ -116,6 +116,14 @@ Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, 
 - `src/net.cpp` UDP broadcast discovery, packets and the small Linux/Windows platform layer.
   The host runs the game and streams the state to the other player 60 times a second;
   the joiner sends its button presses.
-- `src/gfx.cpp` Drawing: anti-aliased shapes, chunky pixel font, the Pocket Bloop slime.
+- `src/gfx.cpp` Drawing: anti-aliased shapes, outlined TrueType text (stb_truetype), the Pocket Bloop slime.
 - `src/audio.cpp` Synthesized sound effects, no asset files.
 - `src/main.cpp` Menus, input, rendering of the jar, effects.
+
+## Credits
+
+- Fonts: [Mochiy Pop One](https://fonts.google.com/specimen/Mochiy+Pop+One) and
+  [M PLUS Rounded 1c](https://fonts.google.com/specimen/M+PLUS+Rounded+1c), both under the SIL Open Font License 1.1,
+  embedded in `src/fonts_data.h`.
+- [stb_truetype](https://github.com/nothings/stb) by Sean Barrett (public domain).
+- [SDL2](https://libsdl.org) (zlib license).

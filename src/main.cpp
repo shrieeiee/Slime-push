@@ -93,6 +93,7 @@ struct Options {
     int selftest = 0;
     std::string shot; double shotAt = 0;
     int theme = -1;
+    std::string screen;
 };
 
 struct App {
@@ -636,7 +637,7 @@ struct App {
 
     void drawBlobs(const BlobMap& m, float ox, float oy, float cs, uint8_t alpha, bool faces = true) {
         const Theme& T = th();
-        float pad = std::max(0.5f, cs * 0.05f), o = std::max(1.5f, cs * 0.1f), rad = cs * 0.32f;
+        float pad = std::max(0.5f, cs * 0.04f), o = std::max(2.5f, cs * 0.15f), rad = cs * 0.34f;
         auto same = [&](int y, int x, int y2, int x2) {
             if (y2 < 0 || y2 >= m.h || x2 < 0 || x2 >= m.w) return false;
             return m.t[y2][x2] && m.id[y2][x2] == m.id[y][x] && m.t[y][x];
@@ -703,30 +704,116 @@ struct App {
         drawBlobs(m, cx - w / 2 - minx * cs, cy - h / 2 - miny * cs, cs, 255);
     }
 
-    void panelBox(float x, float y, float w, float h) {
+    // ---- console UI kit -------------------------------------------------
+    Col border() const { return th().line; }
+    Col ink() const { return th().slimeInk; }
+
+    // outlined display text (white or coloured fill, thick ink outline, drop shadow)
+    float head(float x, float y, float size, Col fill, const char* s, Align al = AL_CENTER, int font = F_DISPLAY) {
+        TextStyle st; st.font = font; st.fill = fill; st.outline = ink();
+        st.outlineW = std::max(2.5f, size * 0.2f); st.shadow = std::max(2.0f, size * 0.14f);
+        return g.print(x, y, size, st, s, al);
+    }
+    // bold body text, no outline
+    float body(float x, float y, float size, Col c, const char* s, Align al = AL_LEFT) {
+        return g.text(x, y, size, c, s, al, F_BODY);
+    }
+
+    void panelBox(float x, float y, float w, float h, Col fill = Col{0, 0, 0, 0}) {
         const Theme& T = th();
-        g.rrect(x - 3, y - 3, w + 6, h + 6, 18, T.line);
-        g.rrect(x, y, w, h, 15, T.panel);
+        g.rrect(x - 7, y - 7 + 9, w + 14, h + 14, 26, withA(ink(), 60));
+        g.rrect(x - 7, y - 7, w + 14, h + 14, 26, border());
+        g.rrect(x, y, w, h, 19, fill.a ? fill : T.panel);
+    }
+
+    // inset well (hold / next boxes)
+    void well(float x, float y, float w, float h) {
+        g.rrect(x - 4, y - 4, w + 8, h + 8, 14, border());
+        g.rrect(x, y, w, h, 10, th().field);
+        g.rrect(x, y, w, 6, 3, withA(ink(), 30));
+    }
+
+    // chunky console button with a 3D lip
+    void button(float cx, float y, float w, const char* label, bool on, float h = 52) {
+        const Theme& T = th();
+        float lift = on ? -3 - std::fabs(std::sin((float)t * 5)) * 2 : 0;
+        if (on) w += 16;
+        float x = cx - w / 2, yy = y + lift, lipH = 7, b = 5;
+        Col face = on ? T.pop : T.panel;
+        Col lip = on ? hex(0xe09a2a) : mix(T.panel, ink(), 0.28f);
+        g.rrect(x - b, y + 9 - b, w + 2 * b, h + lipH + 2 * b, (h + 2 * b) / 2, withA(ink(), 55));
+        g.rrect(x - b, yy - b, w + 2 * b, h + lipH + 2 * b, (h + 2 * b) / 2, border());
+        g.rrect(x, yy + lipH, w, h, h / 2, lip);
+        g.rrect(x, yy, w, h, h / 2, face);
+        g.rrect(x + h * 0.35f, yy + 6, w - h * 0.7f, h * 0.24f, h * 0.12f, Col{255, 255, 255, (uint8_t)(on ? 110 : 70)});
+        float size = 17;
+        float ty = yy + (h - size) / 2 + 1;
+        if (on) head(cx, ty, size, Col{255, 255, 255, 255}, label, AL_CENTER, F_BODY);
+        else body(cx, ty, size, T.text, label, AL_CENTER);
+        if (on) {
+            float hop = std::fabs(std::sin((float)t * 6));
+            g.slime(x - 40, yy + h + 4 - hop * 10, 50, pieceColor(5), ink(), (1 - hop) * 0.35f - 0.1f, blinkFor(9, 1), 0, (float)t);
+        }
+    }
+
+    // controller-style prompts along the bottom right, e.g. {"A","SELECT"},{"B","BACK"}
+    void prompts(std::initializer_list<std::pair<const char*, const char*>> items, float y = SH - 46) {
+        const Theme& T = th();
+        float total = 0;
+        for (auto& it : items) total += 40 + g.measure(it.second, 15, F_BODY) + 30;
+        float x = SW - 28 - total;
+        for (auto& it : items) {
+            std::string k = it.first;
+            Col c = k == "A" ? hex(0x46b98a) : k == "B" ? hex(0xff6f9f) : k == "X" ? hex(0x4fbfd8) : k == "Y" ? hex(0xffcf4d) : T.muted;
+            float cx = x + 17, cy = y + 8;
+            if (k.size() == 1) {
+                g.circle(cx, cy + 3, 18, withA(ink(), 60));
+                g.circle(cx, cy, 18, border());
+                g.circle(cx, cy, 14, c);
+                head(cx, cy - 7, 14, Col{255, 255, 255, 255}, k.c_str(), AL_CENTER, F_BODY);
+                x += 40;
+            } else {   // wide key such as START or a d-pad hint
+                float kw = g.measure(k.c_str(), 11, F_BODY) + 24;
+                g.rrect(x - 4, cy - 15, kw + 8, 30, 15, border());
+                g.rrect(x, cy - 11, kw, 22, 11, c);
+                head(x + kw / 2, cy - 5, 11, Col{255, 255, 255, 255}, k.c_str(), AL_CENTER, F_BODY);
+                x += kw + 12;
+            }
+            body(x, y + 1, 15, T.text, it.second);
+            x += g.measure(it.second, 15, F_BODY) + 30;
+        }
+    }
+
+    // title ribbon for sub screens
+    void banner(const char* title, Col fill) {
+        float w = g.measure(title, 34, F_DISPLAY) + 110, h = 70, x = SW / 2 - w / 2, y = 26;
+        g.rrect(x - 6, y - 6 + 9, w + 12, h + 12, 41, withA(ink(), 60));
+        g.rrect(x - 6, y - 6, w + 12, h + 12, 41, border());
+        g.rrect(x, y, w, h, 35, fill);
+        g.rrect(x + 30, y + 7, w - 60, 14, 7, Col{255, 255, 255, 70});
+        head(SW / 2, y + (h - 34) / 2, 34, Col{255, 255, 255, 255}, title);
     }
 
     void drawBackground() {
         const Theme& T = th();
         g.clear(T.bg);
-        // soft drifting bubbles
-        for (int i = 0; i < 26; ++i) {
-            float sx = std::fmod(i * 197.3f + (float)t * (6 + (i % 5) * 3), (float)SW + 120) - 60;
-            float sy = std::fmod(i * 131.7f + 300, (float)SH) + std::sin((float)t * 0.7f + i) * 12;
-            float r = 10 + (i * 37 % 40);
-            g.circle(sx, sy, r, T.bgDot);
-        }
+        // slow diagonal scrolling dot grid, like a console home screen
+        float sp = 64, off = std::fmod((float)t * 18, sp * 2);
+        for (int row = -2; row < SH / sp + 3; ++row)
+            for (int col = -2; col < SW / sp + 3; ++col) {
+                float x = col * sp + (row & 1) * sp / 2 + off - sp, y = row * sp + off * 0.5f - sp;
+                g.circle(x, y, 11, T.bgDot);
+            }
     }
 
     void drawField(float sx, float sy) {
         const Theme& T = th();
         const State& s = view;
         float x0 = FX + sx, y0 = FY + sy;
-        g.rrect(x0 - 14, y0 - 14, W * C + 28, H * C + 28, 20, T.line);
-        g.rrect(x0 - 11, y0 - 11, W * C + 22, H * C + 22, 17, T.shell);
+        g.rrect(x0 - 18, y0 - 18 + 6, W * C + 36, H * C + 36, 24, withA(ink(), 60));
+        g.rrect(x0 - 18, y0 - 18, W * C + 36, H * C + 36, 24, border());
+        g.rrect(x0 - 12, y0 - 12, W * C + 24, H * C + 24, 18, T.shell);
+        g.rrect(x0 - 5, y0 - 5, W * C + 10, H * C + 10, 8, border());
         g.rect(x0, y0, W * C, H * C, T.field);
         for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) g.circle(x0 + x * C + C / 2, y0 + y * C + C / 2, 1.6f, T.fieldDot);
 
@@ -763,12 +850,13 @@ struct App {
         // push line
         float ly = y0 + srow(s.center) * C;
         if (viewer == 1) ly = y0 + (H - s.center) * C;
-        for (float x = 0; x <= W * C; x += 3) {
-            float wy = std::sin(x * 0.12f + (float)t * 4) * 2.2f;
-            g.circle(x0 + x, ly + wy, 2.2f, withA(T.pop, 230));
-        }
-        g.circle(x0 - 11, ly, 7, T.slimeInk); g.circle(x0 - 11, ly, 5, T.pop);
-        g.circle(x0 + W * C + 11, ly, 7, T.slimeInk); g.circle(x0 + W * C + 11, ly, 5, T.pop);
+        for (int pass = 0; pass < 2; ++pass)
+            for (float x = 0; x <= W * C; x += 2.5f) {
+                float wy = std::sin(x * 0.12f + (float)t * 4) * 2.5f;
+                g.circle(x0 + x, ly + wy, pass ? 2.6f : 4.6f, pass ? T.pop : border());
+            }
+        g.circle(x0 - 9, ly, 10, border()); g.circle(x0 - 9, ly, 6, T.pop);
+        g.circle(x0 + W * C + 9, ly, 10, border()); g.circle(x0 + W * C + 9, ly, 6, T.pop);
 
         // ghosts + active pieces
         if (s.phase == PH_PLAY) {
@@ -820,44 +908,46 @@ struct App {
         }
     }
 
-    void drawPlayerPanel(int p, float x, float y, bool top) {
+    void drawPlayerPanel(int p, float x, float y) {
         const Theme& T = th();
         const PlayerView& v = view.pl[p];
-        float w = 210, h = 400;
+        float w = 214, h = 404;
         panelBox(x, y, w, h);
         std::string name = (mode == M_CPU && p == 1) ? std::string("CPU ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD")
                          : (mode == M_LOCAL) ? (p == 0 ? "PLAYER 1" : "PLAYER 2")
                          : (p == viewer ? myName : peerName);
         Col pc = p == 0 ? pieceColor(5) : pieceColor(6);
-        float cy = top ? y + 18 : y + 18;
-        g.rrect(x + 14, cy, w - 28, 26, 13, pc);
-        g.text(x + w / 2, cy + 6, 2, T.slimeInk, name.c_str(), AL_CENTER);
+        // name ribbon
+        g.rrect(x + 8, y + 10, w - 16, 42, 21, border());
+        g.rrect(x + 13, y + 15, w - 26, 32, 16, pc);
+        g.rrect(x + 26, y + 18, w - 52, 8, 4, Col{255, 255, 255, 80});
+        head(x + w / 2, y + 23, 14, Col{255, 255, 255, 255}, name.c_str(), AL_CENTER, F_BODY);
         // hold + next
-        float by = cy + 40;
-        g.text(x + 20, by, 2, T.muted, "HOLD");
-        g.rrect(x + 16, by + 20, 72, 56, 12, T.field);
-        if (v.hold > 0) drawMini(v.hold, x + 52, by + 48, 14);
-        g.text(x + 110, by, 2, T.muted, "NEXT");
-        g.rrect(x + 106, by + 20, 88, 240, 12, T.field);
-        for (int i = 0; i < NEXT_SHOWN; ++i) drawMini(v.next[i], x + 150, by + 46 + i * 46, i == 0 ? 15 : 12);
+        float by = y + 70;
+        body(x + 20, by, 13, T.text, "HOLD");
+        well(x + 18, by + 20, 74, 58);
+        if (v.hold > 0) drawMini(v.hold, x + 55, by + 49, 14);
+        body(x + 116, by, 13, T.text, "NEXT");
+        well(x + 114, by + 20, 82, 246);
+        for (int i = 0; i < NEXT_SHOWN; ++i) drawMini(v.next[i], x + 155, by + 48 + i * 47, i == 0 ? 16 : 12);
         // stats
         char buf[64];
-        float sy = by + 90;
-        g.text(x + 20, sy, 2, T.muted, "SCORE");
-        snprintf(buf, sizeof(buf), "%d", v.score);
-        g.text(x + 20, sy + 20, 3, T.text, buf);
-        g.text(x + 20, sy + 60, 2, T.muted, "LINES");
-        snprintf(buf, sizeof(buf), "%d", v.lines);
-        g.text(x + 20, sy + 80, 3, T.text, buf);
-        g.text(x + 20, sy + 120, 2, T.muted, "LEVEL");
-        snprintf(buf, sizeof(buf), "%d", view.level);
-        g.text(x + 20, sy + 140, 3, T.text, buf);
+        float sy = by + 98;
+        auto stat = [&](float yy, const char* label, const char* val, Col vc) {
+            body(x + 20, yy, 12, T.muted, label);
+            head(x + 20, yy + 20, 20, vc, val, AL_LEFT, F_DISPLAY);
+        };
+        snprintf(buf, sizeof(buf), "%d", v.score); stat(sy, "SCORE", buf, Col{255, 255, 255, 255});
+        snprintf(buf, sizeof(buf), "%d", v.lines); stat(sy + 58, "LINES", buf, Col{255, 255, 255, 255});
+        snprintf(buf, sizeof(buf), "%d", view.level); stat(sy + 116, "LEVEL", buf, Col{255, 255, 255, 255});
         // push lead
         int lead = (view.center - H / 2) * (p == 0 ? 1 : -1);
-        g.text(x + 20, y + h - 50, 2, T.muted, "PUSH");
         snprintf(buf, sizeof(buf), "%+d", lead);
-        g.text(x + 20, y + h - 30, 3, lead > 0 ? hex(0x46b98a) : lead < 0 ? T.danger : T.text, buf);
-        (void)v;
+        float py = y + h - 60;
+        g.rrect(x + 14, py - 4, w - 28, 50, 16, border());
+        g.rrect(x + 18, py, w - 36, 42, 13, lead > 0 ? hex(0x46b98a) : lead < 0 ? T.danger : T.muted);
+        head(x + 34, py + 13, 15, Col{255, 255, 255, 255}, "PUSH", AL_LEFT, F_BODY);
+        head(x + w - 34, py + 10, 20, Col{255, 255, 255, 255}, buf, AL_RIGHT, F_DISPLAY);
     }
 
     int moodFor(int p) const {
@@ -875,224 +965,218 @@ struct App {
         float sq = squash[p] + bob;
         float hop = 0;
         if (view.phase == PH_OVER && view.winner == p) hop = std::fabs(std::sin((float)t * 7)) * 30;
-        g.ellipse(cx, by + 4, w * 0.45f, w * 0.06f, withA(th().slimeInk, 50));
-        g.slime(cx, by - hop, w, p == 0 ? pieceColor(5) : pieceColor(6), th().slimeInk, sq, blinkFor(p * 7 + 3, 0), moodFor(p), (float)t);
+        g.ellipse(cx, by + 4, w * 0.45f, w * 0.07f, withA(ink(), 60));
+        g.slime(cx, by - hop, w, p == 0 ? pieceColor(5) : pieceColor(6), ink(), sq, blinkFor(p * 7 + 3, 0), moodFor(p), (float)t);
     }
 
-    void centerCard(float y, float h) {
-        panelBox(FX - 60, y, W * C + 120, h);
-    }
+    void centerCard(float y, float h) { panelBox(FX - 70, y, W * C + 140, h); }
 
     void drawGame() {
         const Theme& T = th();
-        if (!haveView) { drawBackground(); g.text(SW / 2, SH / 2, 4, T.text, "CONNECTING...", AL_CENTER, true); return; }
+        Col white{255, 255, 255, 255};
         drawBackground();
+        if (!haveView) { head(SW / 2, SH / 2 - 20, 40, white, "CONNECTING..."); return; }
         std::uniform_real_distribution<float> U(-1, 1);
         float sx = shake > 0.3f ? U(rng) * shake : 0, sy = shake > 0.3f ? U(rng) * shake : 0;
         drawField(sx, sy);
 
         int me = viewer, op = 1 - viewer;
-        drawPlayerPanel(me, FX - 290, FY, true);
-        drawPlayerPanel(op, FX + W * C + 80, SH - FY - 400, false);
-        drawMascot(me, FX - 185, SH - 40, 170);
-        drawMascot(op, FX + W * C + 185, 230, 170);
+        drawPlayerPanel(me, FX - 300, FY + 2);
+        drawPlayerPanel(op, FX + W * C + 86, SH - FY - 406);
+        drawMascot(me, FX - 193, SH - 34, 170);
+        drawMascot(op, FX + W * C + 193, 236, 170);
 
-        // controls hint
-        const char* hint = (mode == M_LOCAL) ? "START: PAUSE" : (mode == M_CPU ? "START: PAUSE" : "START: FORFEIT");
-        g.text(24, SH - 26, 2, T.muted, hint);
+        if (mode == M_HOST || mode == M_CLIENT) prompts({{"START", "FORFEIT"}}, SH - 46);
+        else prompts({{"START", "PAUSE"}}, SH - 46);
 
         for (auto& f : texts) {
             float a = f.t < 1.0f ? 1.0f : 1.0f - (f.t - 1.0f) / 0.3f;
             float pop = f.t < 0.12f ? 0.6f + f.t / 0.12f * 0.5f : 1.0f + 0.1f * std::max(0.0f, 0.25f - f.t);
-            float s = f.scale * pop;
-            g.text(f.x + 2, f.y + 2, s, withA(T.slimeInk, (uint8_t)(220 * a)), f.s.c_str(), AL_CENTER, true);
-            g.text(f.x, f.y, s, withA(f.c, (uint8_t)(255 * a)), f.s.c_str(), AL_CENTER, true);
+            float size = f.scale * 8 * pop;
+            TextStyle st; st.font = F_DISPLAY; st.fill = withA(f.c, (uint8_t)(255 * a));
+            st.outline = withA(ink(), (uint8_t)(255 * a)); st.outlineW = size * 0.2f; st.shadow = size * 0.14f;
+            g.print(f.x, f.y, size, st, f.s.c_str(), AL_CENTER);
         }
 
         const State& s = view;
+        float mid = FX + W * C / 2;
         if (s.phase == PH_COUNTDOWN) {
             int n = s.phaseTimer / 60 + 1;
             char b[4]; snprintf(b, sizeof(b), "%d", std::min(3, n));
             float k = (s.phaseTimer % 60) / 60.0f;
-            float sc_ = 10 + 6 * k;
-            float cy = FY + H * C / 2 - sc_ * 3.5f;
-            g.text(FX + W * C / 2 + 4, cy + 4, sc_, T.slimeInk, b, AL_CENTER, true);
-            g.text(FX + W * C / 2, cy, sc_, T.pop, b, AL_CENTER, true);
+            float size = 90 + 50 * k * k;
+            head(mid, FY + H * C / 2 - size / 2, size, T.pop, b);
         } else if (s.phase == PH_PLAY && sawPlay && s.frame - playStartFrame < 50) {
-            float cy = FY + H * C / 2 - 30;
-            g.text(FX + W * C / 2 + 3, cy + 3, 8, T.slimeInk, "PUSH!", AL_CENTER, true);
-            g.text(FX + W * C / 2, cy, 8, T.pop, "PUSH!", AL_CENTER, true);
+            head(mid, FY + H * C / 2 - 30, 60, T.pop, "PUSH!");
         }
 
         if (s.phase == PH_OVER) {
-            centerCard(270, 250);
-            const char* head;
-            if (s.winner == 2) head = "DRAW!";
-            else if (mode == M_LOCAL) head = s.winner == 0 ? "P1 WINS!" : "P2 WINS!";
-            else head = s.winner == viewer ? "YOU WIN!" : "YOU LOSE";
-            g.text(FX + W * C / 2 + 3, 303, 6, T.slimeInk, head, AL_CENTER, true);
-            g.text(FX + W * C / 2, 300, 6, s.winner == viewer || mode == M_LOCAL ? T.pop : T.danger, head, AL_CENTER, true);
+            centerCard(250, 290);
+            const char* hd;
+            bool good = s.winner == viewer || mode == M_LOCAL;
+            if (s.winner == 2) hd = "DRAW!";
+            else if (mode == M_LOCAL) hd = s.winner == 0 ? "P1 WINS!" : "P2 WINS!";
+            else hd = s.winner == viewer ? "YOU WIN!" : "YOU LOSE";
+            head(mid, 282, 44, good ? T.pop : T.danger, hd);
             const char* why = s.reason == 1 ? "OPPONENT LEFT" : s.reason == 2 ? "BY FORFEIT" : "";
-            g.text(FX + W * C / 2, 365, 2, T.muted, why, AL_CENTER);
+            body(mid, 348, 15, T.muted, why, AL_CENTER);
             bool canRematch = !(mode == M_HOST && peerGone);
             if (canRematch) {
-                const char* r = s.pl[viewer].ready ? "WAITING FOR THEM..." : "A: PLAY AGAIN";
-                if (mode == M_LOCAL) r = (s.pl[0].ready || s.pl[1].ready) ? "BOTH PRESS A..." : "A: PLAY AGAIN";
-                g.text(FX + W * C / 2, 410, 2, T.text, r, AL_CENTER);
+                const char* r = s.pl[viewer].ready ? "WAITING FOR THEM..." : "PLAY AGAIN";
+                if (mode == M_LOCAL) r = (s.pl[0].ready || s.pl[1].ready) ? "BOTH PRESS A..." : "PLAY AGAIN";
+                button(mid, 384, 250, r, !s.pl[viewer].ready);
                 if (mode != M_LOCAL && s.pl[1 - viewer].ready && !s.pl[viewer].ready)
-                    g.text(FX + W * C / 2, 440, 2, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
+                    body(mid, 458, 15, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
             }
-            g.text(FX + W * C / 2, 475, 2, T.muted, "B: BACK TO MENU", AL_CENTER);
+            prompts({{"A", "REMATCH"}, {"B", "MENU"}}, 492);
         }
 
         if (paused) {
             g.rect(0, 0, SW, SH, withA(T.bg, 170));
-            centerCard(250, 300);
-            g.text(FX + W * C / 2, 280, 5, T.text, "PAUSED", AL_CENTER, true);
+            centerCard(220, 330);
+            head(mid, 248, 40, white, "PAUSED");
             static const char* items[3] = {"RESUME", "RESTART", "QUIT TO MENU"};
-            for (int i = 0; i < 3; ++i) pill(FX + W * C / 2, 350 + i * 56, 250, items[i], i == pauseSel);
+            for (int i = 0; i < 3; ++i) button(mid, 320 + i * 72, 260, items[i], i == pauseSel);
         }
         if (forfeitAsk) {
-            centerCard(300, 180);
-            g.text(FX + W * C / 2, 330, 4, T.text, "GIVE UP?", AL_CENTER, true);
-            g.text(FX + W * C / 2, 390, 2, T.text, "A: YES, FORFEIT", AL_CENTER);
-            g.text(FX + W * C / 2, 420, 2, T.muted, "B: KEEP PLAYING", AL_CENTER);
+            g.rect(0, 0, SW, SH, withA(T.bg, 140));
+            centerCard(280, 210);
+            head(mid, 310, 36, white, "GIVE UP?");
+            body(mid, 372, 15, T.text, "THE OTHER PLAYER WINS THIS ROUND", AL_CENTER);
+            prompts({{"A", "FORFEIT"}, {"B", "KEEP PLAYING"}}, 432);
         }
     }
 
-    void pill(float cx, float y, float w, const char* label, bool on) {
-        const Theme& T = th();
-        float h = 44;
-        float bounce = on ? std::sin((float)t * 6) * 2 : 0;
-        g.rrect(cx - w / 2 - 3, y - 3 + bounce, w + 6, h + 6, (h + 6) / 2, T.line);
-        g.rrect(cx - w / 2, y + bounce, w, h, h / 2, on ? T.pop : T.panel);
-        g.text(cx, y + 15 + bounce, 2, on ? T.slimeInk : T.text, label, AL_CENTER);
-    }
-
-    void drawTitleLogo(float cx, float y, float scale) {
-        const Theme& T = th();
+    void drawTitleLogo(float cx, float y, float size) {
         const char* s = "SLIME PUSH";
-        float w = g.textWidth(s, scale);
+        float w = g.measure(s, size, F_DISPLAY);
         float x = cx - w / 2;
         static const int cols[] = {5, 7, 2, 4, 3, 0, 6, 1, 5, 7};
         for (int i = 0; s[i]; ++i) {
             char ch[2] = {s[i], 0};
-            float wob = std::sin((float)t * 3 + i * 0.6f) * 5;
-            g.text(x + i * 6 * scale + 5, y + wob + 6, scale, T.slimeInk, ch, AL_LEFT, true);
-            g.text(x + i * 6 * scale, y + wob, scale, pieceColor(cols[i] ? cols[i] : 2), ch, AL_LEFT, true);
+            float cw = g.measure(ch, size, F_DISPLAY);
+            float wob = std::sin((float)t * 3 + i * 0.6f) * 6;
+            if (s[i] != ' ') head(x, y + wob, size, pieceColor(cols[i] ? cols[i] : 2), ch, AL_LEFT, F_DISPLAY);
+            x += cw;
         }
     }
 
     void drawTitle() {
         const Theme& T = th();
         drawBackground();
-        drawTitleLogo(SW / 2, 60, 11);
+        drawTitleLogo(SW / 2, 42, 80);
         float hop = std::fabs(std::sin((float)t * 2.6f));
-        g.ellipse(330, 650, 120 * (1 - hop * 0.3f), 14, withA(T.slimeInk, 40));
-        g.slime(330, 640 - hop * 60, 260, pieceColor(5), T.slimeInk, (1 - hop) * 0.5f - 0.15f, blinkFor(1, 0), 0, (float)t);
-        g.slime(470, 660, 110, pieceColor(6), T.slimeInk, std::sin((float)t * 5) * 0.15f, blinkFor(2, 0), 0, (float)t);
+        g.ellipse(310, 660, 120 * (1 - hop * 0.3f), 16, withA(ink(), 50));
+        g.slime(310, 650 - hop * 60, 260, pieceColor(5), ink(), (1 - hop) * 0.5f - 0.15f, blinkFor(1, 0), 0, (float)t);
+        g.slime(455, 668, 110, pieceColor(6), ink(), std::sin((float)t * 5) * 0.15f, blinkFor(2, 0), 0, (float)t);
         static const char* items[7] = {"LAN BATTLE: HOST", "LAN BATTLE: JOIN", "VS CPU", "2 PLAYERS (2 PADS)", "HOW TO PLAY", "SETTINGS", "QUIT"};
-        for (int i = 0; i < 7; ++i) pill(870, 220 + i * 66, 400, items[i], i == sel);
-        g.text(SW - 24, SH - 26, 2, T.muted, myName.c_str(), AL_RIGHT);
+        for (int i = 0; i < 7; ++i) button(880, 200 + i * 74, 400, items[i], i == sel);
+        // player tag, bottom left
+        g.rrect(20, SH - 62, g.measure(myName.c_str(), 14, F_BODY) + 40, 40, 20, border());
+        g.rrect(24, SH - 58, g.measure(myName.c_str(), 14, F_BODY) + 32, 32, 16, T.panel);
+        body(40, SH - 49, 14, T.text, myName.c_str());
+        prompts({{"A", "SELECT"}});
     }
 
     void drawHost() {
         const Theme& T = th();
         drawBackground();
-        g.text(SW / 2, 70, 5, T.text, "WAITING FOR A CHALLENGER", AL_CENTER, true);
+        banner("WAITING FOR A CHALLENGER", pieceColor(3));
         float hop = std::fabs(std::sin((float)t * 3));
-        g.slime(SW / 2, 420 - hop * 40, 220, pieceColor(5), T.slimeInk, (1 - hop) * 0.4f, blinkFor(1, 0), 0, (float)t);
-        panelBox(SW / 2 - 320, 470, 640, 250);
+        g.ellipse(SW / 2, 432, 100, 12, withA(ink(), 50));
+        g.slime(SW / 2, 424 - hop * 40, 210, pieceColor(5), ink(), (1 - hop) * 0.4f, blinkFor(1, 0), 0, (float)t);
+        panelBox(SW / 2 - 330, 470, 660, 230);
         std::string a = "YOU ARE " + myName;
-        g.text(SW / 2, 500, 3, T.text, a.c_str(), AL_CENTER);
-        g.text(SW / 2, 545, 2, T.muted, "ON THE OTHER DECK PICK  LAN BATTLE: JOIN", AL_CENTER);
-        g.text(SW / 2, 575, 2, T.muted, "THIS DECK WILL SHOW UP THERE BY ITSELF", AL_CENTER);
-        // local addresses for the curious
+        head(SW / 2, 494, 24, Col{255, 255, 255, 255}, a.c_str(), AL_CENTER, F_BODY);
+        body(SW / 2, 548, 15, T.text, "ON THE OTHER DECK OR PC PICK  LAN BATTLE: JOIN", AL_CENTER);
+        body(SW / 2, 576, 15, T.muted, "THIS ONE WILL SHOW UP THERE BY ITSELF", AL_CENTER);
         std::string ips;
-        for (auto& ip : net::localAddresses()) { if (!ips.empty()) ips += "  "; ips += ip; }
+        for (auto& ip : net::localAddresses()) { if (!ips.empty()) ips += "   "; ips += ip; }
         if (ips.empty()) ips = "NO NETWORK FOUND - CHECK WI-FI";
-        g.text(SW / 2, 625, 2, T.muted, ("ADDRESS: " + ips).c_str(), AL_CENTER);
+        body(SW / 2, 616, 15, T.muted, ("ADDRESS  " + ips).c_str(), AL_CENTER);
         int dots = (int)(t * 2) % 4;
         std::string w = "BROADCASTING"; for (int i = 0; i < dots; ++i) w += ".";
-        g.text(SW / 2 - 70, 665, 2, T.text, w.c_str());
-        g.text(SW / 2, SH - 40, 2, T.muted, "B: CANCEL", AL_CENTER);
+        body(SW / 2 - g.measure("BROADCASTING...", 15) / 2, 654, 15, hex(0x46b98a), w.c_str());
+        prompts({{"B", "CANCEL"}});
     }
 
     void drawJoin() {
         const Theme& T = th();
         drawBackground();
-        g.text(SW / 2, 60, 5, T.text, "FIND A GAME", AL_CENTER, true);
+        banner("FIND A GAME", pieceColor(6));
         if (joining) {
             float hop = std::fabs(std::sin((float)t * 4));
-            g.slime(SW / 2, 420 - hop * 40, 200, pieceColor(6), T.slimeInk, (1 - hop) * 0.4f, 0, 2, (float)t);
+            g.slime(SW / 2, 420 - hop * 40, 200, pieceColor(6), ink(), (1 - hop) * 0.4f, 0, 2, (float)t);
             std::string s = "JOINING " + peerName + "...";
-            g.text(SW / 2, 480, 3, T.text, s.c_str(), AL_CENTER);
-            g.text(SW / 2, SH - 40, 2, T.muted, "B: CANCEL", AL_CENTER);
+            head(SW / 2, 470, 26, Col{255, 255, 255, 255}, s.c_str(), AL_CENTER, F_BODY);
+            prompts({{"B", "CANCEL"}});
             return;
         }
         auto& hs = finder.hosts;
         if (hs.empty()) {
             float k = std::sin((float)t * 2) * 0.2f;
-            g.slime(SW / 2, 400, 200, pieceColor(6), T.slimeInk, k, blinkFor(4, 0), 1, (float)t);
+            g.slime(SW / 2, 400, 200, pieceColor(6), ink(), k, blinkFor(4, 0), 1, (float)t);
             int dots = (int)(t * 2) % 4;
-            std::string s = "LOOKING FOR SLIMES ON YOUR NETWORK"; for (int i = 0; i < dots; ++i) s += ".";
-            g.text(SW / 2 - g.textWidth("LOOKING FOR SLIMES ON YOUR NETWORK", 3) / 2, 450, 3, T.text, s.c_str());
-            g.text(SW / 2, 510, 2, T.muted, "ON THE OTHER DECK PICK  LAN BATTLE: HOST", AL_CENTER);
-            g.text(SW / 2, 540, 2, T.muted, "BOTH DECKS NEED TO BE ON THE SAME WI-FI", AL_CENTER);
+            const char* base = "LOOKING FOR SLIMES ON YOUR NETWORK";
+            std::string s = base; for (int i = 0; i < dots; ++i) s += ".";
+            head(SW / 2 - g.measure(base, 22, F_BODY) / 2, 450, 22, Col{255, 255, 255, 255}, s.c_str(), AL_LEFT, F_BODY);
+            body(SW / 2, 508, 15, T.text, "ON THE OTHER DECK OR PC PICK  LAN BATTLE: HOST", AL_CENTER);
+            body(SW / 2, 536, 15, T.muted, "BOTH NEED TO BE ON THE SAME NETWORK", AL_CENTER);
+            prompts({{"B", "BACK"}});
         } else {
             for (size_t i = 0; i < hs.size() && i < 6; ++i) {
                 std::string label = hs[i].name + (hs[i].busy ? "  (IN A GAME)" : "");
-                pill(SW / 2, 170 + (float)i * 70, 560, label.c_str(), (int)i == sel);
+                button(SW / 2, 160 + (float)i * 78, 560, label.c_str(), (int)i == sel);
             }
-            g.text(SW / 2, SH - 70, 2, T.muted, "A: JOIN", AL_CENTER);
+            prompts({{"A", "JOIN"}, {"B", "BACK"}});
         }
-        g.text(SW / 2, SH - 40, 2, T.muted, "B: BACK", AL_CENTER);
     }
 
     void drawSettings() {
-        const Theme& T = th();
         drawBackground();
-        g.text(SW / 2, 80, 6, T.text, "SETTINGS", AL_CENTER, true);
+        banner("SETTINGS", pieceColor(4));
         std::string items[4] = {
-            std::string("THEME: ") + (cfg.theme ? "DARK" : "LIGHT"),
-            std::string("SOUND: ") + (cfg.sound ? "ON" : "OFF"),
-            std::string("CPU: ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD"),
+            std::string("THEME:  ") + (cfg.theme ? "DARK" : "LIGHT"),
+            std::string("SOUND:  ") + (cfg.sound ? "ON" : "OFF"),
+            std::string("CPU:  ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD"),
             "BACK"};
-        for (int i = 0; i < 4; ++i) pill(SW / 2, 220 + i * 80, 460, items[i].c_str(), i == sel);
-        g.text(SW / 2, SH - 40, 2, T.muted, "LEFT / RIGHT: CHANGE    B: BACK", AL_CENTER);
+        for (int i = 0; i < 4; ++i) button(SW / 2, 190 + i * 86, 460, items[i].c_str(), i == sel);
+        prompts({{"< >", "CHANGE"}, {"B", "BACK"}});
     }
 
     void drawHelp() {
         const Theme& T = th();
         drawBackground();
-        g.text(SW / 2, 40, 5, T.text, "HOW TO PLAY", AL_CENTER, true);
-        panelBox(120, 110, SW - 240, 620);
-        const char* lines[] = {
+        banner("HOW TO PLAY", pieceColor(7));
+        panelBox(110, 128, SW - 220, 530);
+        const char* rules[] = {
             "YOU BOTH SHARE ONE TALL JAR OF SLIME.",
-            "YOUR SLIMES DROP DOWN FROM THE TOP. THEIRS RISE UP FROM THE BOTTOM.",
-            "FILL A ROW TO SPLAT IT. CLEAR 2 OR MORE AT ONCE TO PUSH THE WHOLE",
-            "PILE TOWARD YOUR OPPONENT: DOUBLE +1  TRIPLE +2  QUAD +4.",
-            "IF SLIME GETS PUSHED OFF THEIR END, OR THEY STACK INTO THEIR OWN",
-            "END, THEY LOSE. DROP A SLIME DOWN AN EMPTY COLUMN AND IT PLOPS AWAY.",
-            "",
-            "CONTROLS",
-            "D-PAD OR LEFT STICK   MOVE",
-            "DOWN                  SOFT DROP",
-            "UP                    HARD DROP",
-            "A                     SPIN RIGHT",
-            "B OR X                SPIN LEFT",
-            "Y, L1/R1, L2/R2       HOLD",
-            "START                 PAUSE / FORFEIT",
-            "",
-            "KEYBOARD: ARROWS, X/Z SPIN, C HOLD, SPACE HARD DROP, ENTER, ESC",
+            "YOUR SLIMES DROP FROM THE TOP. THEIRS RISE FROM THE BOTTOM.",
+            "FILL A ROW TO SPLAT IT. CLEAR 2+ ROWS AT ONCE TO SHOVE THE WHOLE",
+            "PILE AT YOUR OPPONENT:  DOUBLE +1   TRIPLE +2   QUAD +4",
+            "SLIME PUSHED OFF THEIR END, OR STACKED INTO THEIR OWN END, LOSES.",
+            "A SLIME DROPPED DOWN AN EMPTY COLUMN PLOPS OUT AND IS GONE.",
         };
-        float y = 140;
-        for (const char* l : lines) {
-            bool head = !strcmp(l, "CONTROLS");
-            g.text(160, y, 2, head ? T.text : (l[0] ? T.text : T.muted), l);
-            y += head ? 38 : 34;
+        float y = 156;
+        head(146, y, 20, pieceColor(5), "RULES", AL_LEFT, F_DISPLAY);
+        y += 40;
+        for (const char* l : rules) { body(146, y, 15, T.text, l); y += 30; }
+        y += 18;
+        head(146, y, 20, pieceColor(6), "CONTROLS", AL_LEFT, F_DISPLAY);
+        y += 42;
+        const char* ctl[][2] = {
+            {"D-PAD / STICK", "MOVE"}, {"DOWN", "SOFT DROP"}, {"UP", "HARD DROP"}, {"A", "SPIN RIGHT"},
+            {"B / X", "SPIN LEFT"}, {"Y / L1 / R1", "HOLD"}, {"START", "PAUSE / FORFEIT"}};
+        for (int i = 0; i < 7; ++i) {
+            float cx = 146 + (i % 2) * 520, cy = y + (i / 2) * 40;
+            float kw = g.measure(ctl[i][0], 12, F_BODY) + 26;
+            g.rrect(cx - 4, cy - 8, kw + 8, 32, 16, border());
+            g.rrect(cx, cy - 4, kw, 24, 12, T.field);
+            body(cx + 13, cy + 2, 12, T.text, ctl[i][0]);
+            body(cx + kw + 18, cy, 15, T.text, ctl[i][1]);
         }
-        g.text(SW / 2, SH - 40, 2, T.muted, "B: BACK", AL_CENTER);
+        body(146, y + 4 * 40 + 6, 13, T.muted, "KEYBOARD: ARROWS, X / Z SPIN, C HOLD, SPACE HARD DROP, ENTER, ESC, F11 FULLSCREEN");
+        prompts({{"B", "BACK"}});
     }
 
     void render() {
@@ -1106,10 +1190,12 @@ struct App {
         }
         if (now < toastUntil && !toast.empty()) {
             const Theme& T = th();
-            float w = g.textWidth(toast.c_str(), 2) + 48;
-            g.rrect(SW / 2 - w / 2 - 3, SH - 100 - 3, w + 6, 46, 23, T.line);
-            g.rrect(SW / 2 - w / 2, SH - 100, w, 40, 20, T.pop);
-            g.text(SW / 2, SH - 87, 2, T.slimeInk, toast.c_str(), AL_CENTER);
+            float w = g.measure(toast.c_str(), 16, F_BODY) + 60;
+            float y = SH - 120;
+            g.rrect(SW / 2 - w / 2 - 6, y - 6 + 8, w + 12, 60, 30, withA(ink(), 60));
+            g.rrect(SW / 2 - w / 2 - 6, y - 6, w + 12, 60, 30, border());
+            g.rrect(SW / 2 - w / 2, y, w, 48, 24, T.pop);
+            body(SW / 2, y + 16, 16, T.slimeInk, toast.c_str(), AL_CENTER);
         }
         SDL_RenderPresent(ren);
     }
@@ -1154,6 +1240,8 @@ struct App {
         else if (!opt.join.empty()) { beginJoin(); connectTo(net::makeAddr(opt.join.c_str(), net::GAME_PORT), opt.join); }
         else if (opt.cpu) startMatch(M_CPU);
         else if (opt.find || opt.autojoin) beginJoin();
+        else if (opt.screen == "settings") sc = SC_SETTINGS;
+        else if (opt.screen == "help") sc = SC_HELP;
 
         Uint64 freq = SDL_GetPerformanceFrequency(), last = SDL_GetPerformanceCounter();
         Uint64 start = last;
@@ -1245,6 +1333,7 @@ int main(int argc, char** argv) {
         else if (a == "--exit-after") app.opt.exitAfter = atof(next().c_str());
         else if (a == "--selftest") return selftest(atoi(next().c_str()));
         else if (a == "--screenshot") { app.opt.shot = next(); app.opt.shotAt = atof(next().c_str()); }
+        else if (a == "--screen") app.opt.screen = next();
         else if (a == "--dark") app.opt.theme = 1;
         else if (a == "--light") app.opt.theme = 0;
         else if (a == "--help" || a == "-h") {
