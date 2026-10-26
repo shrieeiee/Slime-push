@@ -85,13 +85,29 @@ You can also skip discovery and join by address (shown on the host's waiting scr
 on a Deck set Steam's **Launch Options** for Slime Push to `--join 192.168.1.23`; on Windows make a
 shortcut to `SlimePush.exe --join 192.168.1.23`.
 
+## Music
+
+Three original bouncy chiptunes are built in, synthesized by the game itself, so there are no files to ship:
+**Bloop Bounce** plays on the menus, and **Jelly Jam** and **Wobble Rush** take turns in matches.
+The battle tune speeds up a little each time the level goes up. Music and sound effects can be switched
+off separately in Settings.
+
+**Add your own tracks:** drop `.ogg`, `.mp3` or `.wav` files into a `music` folder next to the game
+(`~/Games/SlimePush/music/` on a Deck, next to `SlimePush.exe` on Windows), or into
+`~/.config/slimepush/music/` / `%APPDATA%\SlimePush\music\`. Files whose names start with `title` or `menu`
+play on the menus; everything else joins the match rotation. Seamless loops work best.
+Two free packs that suit the game:
+
+- [NOT JAM Music Pack 2](https://not-jam.itch.io/not-jam-music-pack-2): 15 Game Boy / NES style tracks, CC0, loopable OGG/WAV
+- [Buzzy Bits](https://dylanntaylor.itch.io/buzzy-bits): 6 bright, upbeat 8-bit loops, free including commercial use
+
 ## Other modes
 
 - **VS CPU**: Easy / Normal / Hard (change in Settings).
 - **2 PLAYERS (2 PADS)**: two controllers on one Deck. Player 2's slimes rise from the bottom,
   so for them Up is soft drop and Down is hard drop.
 
-Settings (theme, sound, CPU level) are saved in `~/.config/slimepush/settings.txt` on Linux and
+Settings (theme, music, sound effects, CPU level) are saved in `~/.config/slimepush/settings.txt` on Linux and
 `%APPDATA%\SlimePush\settings.txt` on Windows.
 
 ## Building from source
@@ -117,7 +133,9 @@ Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, 
   The host runs the game and streams the state to the other player 60 times a second;
   the joiner sends its button presses.
 - `src/gfx.cpp` Drawing: anti-aliased shapes, outlined TrueType text (stb_truetype), the Pocket Bloop slime.
-- `src/audio.cpp` Synthesized sound effects, no asset files.
+- `src/audio.cpp` Synthesized sound effects and the looping, crossfading music player.
+- `src/music.cpp` The built-in tunes (written as note strings and rendered by a small chip synth:
+  pulse lead with echo, arpeggios, stepped-triangle bass, noise drums) and the OGG/MP3/WAV loader.
 - `src/main.cpp` Menus, input, rendering of the jar, effects.
 
 ## Credits
@@ -125,5 +143,7 @@ Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, 
 - Fonts: [Mochiy Pop One](https://fonts.google.com/specimen/Mochiy+Pop+One) and
   [M PLUS Rounded 1c](https://fonts.google.com/specimen/M+PLUS+Rounded+1c), both under the SIL Open Font License 1.1,
   embedded in `src/fonts_data.h`.
-- [stb_truetype](https://github.com/nothings/stb) by Sean Barrett (public domain).
+- [stb_truetype and stb_vorbis](https://github.com/nothings/stb) by Sean Barrett (public domain).
+- [dr_mp3 and dr_wav](https://github.com/mackron/dr_libs) by David Reid (public domain / MIT-0).
+- Music: original compositions for this game.
 - [SDL2](https://libsdl.org) (zlib license).

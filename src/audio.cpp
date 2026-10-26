@@ -67,7 +67,45 @@ void Audio::cb(void* ud, Uint8* stream, int len) {
         }
         if (v.pos >= c.size()) v.clip = -1;
     }
+    // music
+    MusicState& m = a->ms;
+    const float fade = 1.0f / (RATE * 0.6f);
+    for (int i = 0; i < frames; ++i) {
+        if (m.switching) {
+            m.gain -= fade;
+            if (m.gain <= 0 || !m.cur) { m.gain = 0; m.cur = m.next; m.next = nullptr; m.pos = 0; m.switching = false; m.target = m.cur ? 1.0f : 0.0f; }
+        } else if (m.gain < m.target) m.gain = std::fmin(m.target, m.gain + fade);
+        if (!m.cur || m.gain <= 0) continue;
+        const std::vector<float>& pcm = m.cur->pcm;
+        size_t n = pcm.size() / 2;
+        if (n < 2) continue;
+        size_t i0 = (size_t)m.pos, i1 = (i0 + 1) % n;
+        float fr = (float)(m.pos - (double)i0);
+        float g = m.gain * a->musicVolume * (a->musicOn ? 1.0f : 0.0f);
+        out[i * 2] += (pcm[i0 * 2] * (1 - fr) + pcm[i1 * 2] * fr) * g;
+        out[i * 2 + 1] += (pcm[i0 * 2 + 1] * (1 - fr) + pcm[i1 * 2 + 1] * fr) * g;
+        m.pos += m.rate;
+        if (m.pos >= (double)n) m.pos -= (double)n;
+    }
     for (int i = 0; i < frames * 2; ++i) out[i] = std::tanh(out[i]);
+}
+
+void Audio::playMusic(TrackPtr t) {
+    if (t == wanted) return;
+    wanted = t;
+    if (!dev) return;
+    SDL_LockAudioDevice(dev);
+    ms.next = t;
+    ms.switching = true;
+    ms.rate = 1.0f;
+    SDL_UnlockAudioDevice(dev);
+}
+
+void Audio::setMusicRate(float r) {
+    if (!dev) return;
+    SDL_LockAudioDevice(dev);
+    ms.rate = r;
+    SDL_UnlockAudioDevice(dev);
 }
 
 bool Audio::init() {
@@ -81,7 +119,7 @@ bool Audio::init() {
     return true;
 }
 
-void Audio::shutdown() { if (dev) SDL_CloseAudioDevice(dev); dev = 0; }
+void Audio::shutdown() { if (dev) SDL_CloseAudioDevice(dev); dev = 0; ms = MusicState(); }
 
 void Audio::play(Sfx s, float vol, float pan) {
     if (!dev || !enabled) return;

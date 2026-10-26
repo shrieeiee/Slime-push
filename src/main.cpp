@@ -13,6 +13,19 @@
 #include "net.hpp"
 #include "gfx.hpp"
 #include "audio.hpp"
+#include "music.hpp"
+#include <thread>
+#include <atomic>
+#include <mutex>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 
 using namespace sp;
 
@@ -24,6 +37,7 @@ static const float FX = (SW - W * C) / 2, FY = 20; // field origin
 struct Config {
     int theme = 0;       // 0 light, 1 dark
     bool sound = true;
+    bool music = true;
     int cpu = 1;
     uint32_t hostId = 0;
     std::string path;
@@ -36,6 +50,7 @@ struct Config {
             while (fscanf(f, "%63s %u", k, &v) == 2) {
                 if (!strcmp(k, "theme")) theme = (int)v & 1;
                 else if (!strcmp(k, "sound")) sound = v != 0;
+                else if (!strcmp(k, "music")) music = v != 0;
                 else if (!strcmp(k, "cpu")) cpu = std::min(2, (int)v);
                 else if (!strcmp(k, "id")) hostId = v;
             }
@@ -46,7 +61,7 @@ struct Config {
     void save() {
         FILE* f = fopen(path.c_str(), "w");
         if (!f) return;
-        fprintf(f, "theme %d\nsound %d\ncpu %d\nid %u\n", theme, sound ? 1 : 0, cpu, hostId);
+        fprintf(f, "theme %d\nsound %d\nmusic %d\ncpu %d\nid %u\n", theme, sound ? 1 : 0, music ? 1 : 0, cpu, hostId);
         fclose(f);
     }
 };
@@ -94,6 +109,7 @@ struct Options {
     std::string shot; double shotAt = 0;
     int theme = -1;
     std::string screen;
+    std::string force;   // debug: pause / over / forfeit shortly before the screenshot
 };
 
 struct App {
@@ -141,6 +157,13 @@ struct App {
     net::InputReceiver inrecv;
     std::vector<net::Addr> bcast;
     std::string myName, peerName;
+
+    // music
+    std::thread musicLoader;
+    std::atomic<bool> musicReady{false};
+    std::vector<TrackPtr> titleTracks, battleTracks;
+    TrackPtr battleTrack;
+    int battleIndex = -1;
 
     // fx
     std::vector<Particle> parts;
@@ -240,6 +263,7 @@ struct App {
     void startMatch(Mode m) {
         mode = m;
         game.reset(rng());
+        pickBattleTrack();
         botFor[0] = opt.autoplay;
         botFor[1] = (m == M_CPU);
         bot[0] = Bot(); bot[1] = Bot();
@@ -254,6 +278,28 @@ struct App {
         sc = SC_GAME;
         lastRecv = now;
         lastStateSeq = 0;
+    }
+
+    void pickBattleTrack() {
+        if (!musicReady || battleTracks.empty()) { battleTrack = nullptr; return; }
+        battleIndex = (battleIndex + 1) % (int)battleTracks.size();
+        battleTrack = battleTracks[(size_t)battleIndex];
+    }
+
+    void updateMusic() {
+        if (!musicReady) return;
+        au.musicOn = cfg.music;
+        TrackPtr want;
+        if (sc == SC_GAME) {
+            if (!battleTrack) pickBattleTrack();
+            bool over = haveView && view.phase == PH_OVER;
+            want = over ? nullptr : battleTrack;
+            if (haveView && view.phase == PH_PLAY && !paused)
+                au.setMusicRate(std::min(1.25f, 1.0f + 0.022f * (view.level - 1)));
+        } else {
+            want = titleTracks.empty() ? nullptr : titleTracks[0];
+        }
+        au.playMusic(want);
     }
 
     void leaveMatch() {
@@ -407,6 +453,12 @@ struct App {
     }
 
     void tickGame() {
+        if (!opt.force.empty() && opt.shotAt > 0 && now > opt.shotAt - 0.6) {
+            if (opt.force == "pause") paused = true;
+            else if (opt.force == "over") game.forfeit(1);
+            else if (opt.force == "forfeit") forfeitAsk = true;
+            opt.force.clear();
+        }
         uint16_t e = allPressed();
         bool net_ = (mode == M_HOST || mode == M_CLIENT);
         const State& cur = (mode == M_CLIENT) ? view : game.s;
@@ -601,17 +653,18 @@ struct App {
     }
     void tickSettings() {
         uint16_t e = menuPressed();
-        const int N = 4;
+        const int N = 5;
         if (e & R_UP) { sel = (sel + N - 1) % N; au.play(S_MOVE); }
         if (e & R_DOWN) { sel = (sel + 1) % N; au.play(S_MOVE); }
         int d = (e & R_RIGHT) ? 1 : (e & R_LEFT) ? -1 : (e & R_A) ? 1 : 0;
-        if (d && sel < 3) {
+        if (d && sel < 4) {
             if (sel == 0) cfg.theme ^= 1;
-            if (sel == 1) { cfg.sound = !cfg.sound; au.enabled = cfg.sound; }
-            if (sel == 2) cfg.cpu = (cfg.cpu + 3 + d) % 3;
+            if (sel == 1) cfg.music = !cfg.music;
+            if (sel == 2) { cfg.sound = !cfg.sound; au.enabled = cfg.sound; }
+            if (sel == 3) cfg.cpu = (cfg.cpu + 3 + d) % 3;
             cfg.save(); au.play(S_SELECT);
         }
-        if ((e & (R_B | R_BACK)) || (sel == 3 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
+        if ((e & (R_B | R_BACK)) || (sel == 4 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
     }
 
     void tick() {
@@ -625,6 +678,7 @@ struct App {
             case SC_GAME: tickGame(); if (sc == SC_GAME) effects(); break;
         }
         tickFx(1.0f / 60);
+        updateMusic();
     }
 
     // ------------------------------------------------------------ drawing
@@ -637,7 +691,7 @@ struct App {
 
     void drawBlobs(const BlobMap& m, float ox, float oy, float cs, uint8_t alpha, bool faces = true) {
         const Theme& T = th();
-        float pad = std::max(0.5f, cs * 0.04f), o = std::max(2.5f, cs * 0.15f), rad = cs * 0.34f;
+        float pad = std::max(0.5f, cs * 0.04f), o = std::max(2.0f, cs * 0.13f), rad = cs * 0.34f;
         auto same = [&](int y, int x, int y2, int x2) {
             if (y2 < 0 || y2 >= m.h || x2 < 0 || x2 >= m.w) return false;
             return m.t[y2][x2] && m.id[y2][x2] == m.id[y][x] && m.t[y][x];
@@ -666,7 +720,7 @@ struct App {
             float px = ox + x * cs, py = oy + y * cs;
             if (!same(y, x, y - 1, x) && !same(y, x, y, x - 1))
                 g.ellipse(px + cs * 0.33f, py + cs * 0.3f, cs * 0.15f, cs * 0.09f, Col{255, 255, 255, 170});
-            if (faces && m.f[y][x]) {
+            if (faces && m.f[y][x] && cs >= 16) {
                 float bl = blinkFor(m.id[y][x], x + y);
                 float ey = py + cs * 0.52f, ex = cs * 0.2f;
                 g.ellipse(px + cs / 2 - ex, ey, cs * 0.085f, cs * 0.12f * (1 - 0.85f * bl), T.slimeInk);
@@ -737,6 +791,7 @@ struct App {
     void button(float cx, float y, float w, const char* label, bool on, float h = 52) {
         const Theme& T = th();
         float lift = on ? -3 - std::fabs(std::sin((float)t * 5)) * 2 : 0;
+        w = std::max(w, g.measure(label, 17, F_BODY) + h + 10);   // never let the label spill out
         if (on) w += 16;
         float x = cx - w / 2, yy = y + lift, lipH = 7, b = 5;
         Col face = on ? T.pop : T.panel;
@@ -757,11 +812,16 @@ struct App {
     }
 
     // controller-style prompts along the bottom right, e.g. {"A","SELECT"},{"B","BACK"}
-    void prompts(std::initializer_list<std::pair<const char*, const char*>> items, float y = SH - 46) {
+    void prompts(std::initializer_list<std::pair<const char*, const char*>> items, float y = SH - 46,
+                 float anchor = SW - 28, Align al = AL_RIGHT) {
         const Theme& T = th();
         float total = 0;
-        for (auto& it : items) total += 40 + g.measure(it.second, 15, F_BODY) + 30;
-        float x = SW - 28 - total;
+        for (auto& it : items) {
+            std::string k = it.first;
+            total += (k.size() == 1 ? 40 : g.measure(it.first, 11, F_BODY) + 36) + g.measure(it.second, 15, F_BODY) + 30;
+        }
+        total -= 30;
+        float x = al == AL_RIGHT ? anchor - total : al == AL_CENTER ? anchor - total / 2 : anchor;
         for (auto& it : items) {
             std::string k = it.first;
             Col c = k == "A" ? hex(0x46b98a) : k == "B" ? hex(0xff6f9f) : k == "X" ? hex(0x4fbfd8) : k == "Y" ? hex(0xffcf4d) : T.muted;
@@ -908,46 +968,57 @@ struct App {
         }
     }
 
+    static constexpr float PANEL_W = 250, PANEL_H = 466;
+
     void drawPlayerPanel(int p, float x, float y) {
         const Theme& T = th();
         const PlayerView& v = view.pl[p];
-        float w = 214, h = 404;
+        const float w = PANEL_W, h = PANEL_H;
+        Col white{255, 255, 255, 255};
         panelBox(x, y, w, h);
         std::string name = (mode == M_CPU && p == 1) ? std::string("CPU ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD")
                          : (mode == M_LOCAL) ? (p == 0 ? "PLAYER 1" : "PLAYER 2")
                          : (p == viewer ? myName : peerName);
         Col pc = p == 0 ? pieceColor(5) : pieceColor(6);
         // name ribbon
-        g.rrect(x + 8, y + 10, w - 16, 42, 21, border());
-        g.rrect(x + 13, y + 15, w - 26, 32, 16, pc);
-        g.rrect(x + 26, y + 18, w - 52, 8, 4, Col{255, 255, 255, 80});
-        head(x + w / 2, y + 23, 14, Col{255, 255, 255, 255}, name.c_str(), AL_CENTER, F_BODY);
-        // hold + next
-        float by = y + 70;
-        body(x + 20, by, 13, T.text, "HOLD");
-        well(x + 18, by + 20, 74, 58);
-        if (v.hold > 0) drawMini(v.hold, x + 55, by + 49, 14);
-        body(x + 116, by, 13, T.text, "NEXT");
-        well(x + 114, by + 20, 82, 246);
-        for (int i = 0; i < NEXT_SHOWN; ++i) drawMini(v.next[i], x + 155, by + 48 + i * 47, i == 0 ? 16 : 12);
-        // stats
+        g.rrect(x + 8, y + 10, w - 16, 44, 22, border());
+        g.rrect(x + 13, y + 15, w - 26, 34, 17, pc);
+        g.rrect(x + 28, y + 19, w - 56, 8, 4, Col{255, 255, 255, 80});
+        head(x + w / 2, y + 25, 15, white, name.c_str(), AL_CENTER, F_BODY);
+
+        // left column: hold + stats, right column: next queue
+        const float lx = x + 18, lw = 100, rx = x + 136, rw = 96, top = y + 70;
+        body(lx + 2, top, 13, T.text, "HOLD");
+        well(lx, top + 22, lw, 78);
+        if (v.hold > 0) drawMini(v.hold, lx + lw / 2, top + 22 + 39, 19);
+        body(rx + 2, top, 13, T.text, "NEXT");
+        well(rx, top + 22, rw, 300);
+        drawMini(v.next[0], rx + rw / 2, top + 22 + 42, 19);
+        g.rect(rx + 12, top + 22 + 82, rw - 24, 3, withA(T.fieldDot, 255));
+        for (int i = 1; i < NEXT_SHOWN; ++i) drawMini(v.next[i], rx + rw / 2, top + 22 + 82 + 32 + (i - 1) * 54, 17);
+
         char buf[64];
-        float sy = by + 98;
-        auto stat = [&](float yy, const char* label, const char* val, Col vc) {
-            body(x + 20, yy, 12, T.muted, label);
-            head(x + 20, yy + 20, 20, vc, val, AL_LEFT, F_DISPLAY);
+        auto stat = [&](float yy, const char* label, const char* val) {
+            body(lx + 2, yy, 12, T.muted, label);
+            float sz = 20;
+            float mw = g.measure(val, sz, F_DISPLAY);
+            if (mw > lw) sz *= lw / mw;                     // big scores shrink to fit
+            head(lx + 2, yy + 20 + (20 - sz) / 2, sz, white, val, AL_LEFT, F_DISPLAY);
         };
-        snprintf(buf, sizeof(buf), "%d", v.score); stat(sy, "SCORE", buf, Col{255, 255, 255, 255});
-        snprintf(buf, sizeof(buf), "%d", v.lines); stat(sy + 58, "LINES", buf, Col{255, 255, 255, 255});
-        snprintf(buf, sizeof(buf), "%d", view.level); stat(sy + 116, "LEVEL", buf, Col{255, 255, 255, 255});
-        // push lead
+        float sy = top + 122;
+        snprintf(buf, sizeof(buf), "%d", v.score); stat(sy, "SCORE", buf);
+        snprintf(buf, sizeof(buf), "%d", v.lines); stat(sy + 64, "LINES", buf);
+        snprintf(buf, sizeof(buf), "%d", view.level); stat(sy + 128, "LEVEL", buf);
+
+        // push lead bar
         int lead = (view.center - H / 2) * (p == 0 ? 1 : -1);
         snprintf(buf, sizeof(buf), "%+d", lead);
-        float py = y + h - 60;
-        g.rrect(x + 14, py - 4, w - 28, 50, 16, border());
-        g.rrect(x + 18, py, w - 36, 42, 13, lead > 0 ? hex(0x46b98a) : lead < 0 ? T.danger : T.muted);
-        head(x + 34, py + 13, 15, Col{255, 255, 255, 255}, "PUSH", AL_LEFT, F_BODY);
-        head(x + w - 34, py + 10, 20, Col{255, 255, 255, 255}, buf, AL_RIGHT, F_DISPLAY);
+        float py = y + h - 58;
+        g.rrect(x + 14, py - 4, w - 28, 50, 18, border());
+        g.rrect(x + 18, py, w - 36, 42, 15, lead > 0 ? hex(0x46b98a) : lead < 0 ? T.danger : T.muted);
+        g.rrect(x + 32, py + 4, w - 64, 7, 3, Col{255, 255, 255, 70});
+        head(x + 36, py + 14, 15, white, "PUSH", AL_LEFT, F_BODY);
+        head(x + w - 36, py + 11, 20, white, buf, AL_RIGHT, F_DISPLAY);
     }
 
     int moodFor(int p) const {
@@ -969,7 +1040,10 @@ struct App {
         g.slime(cx, by - hop, w, p == 0 ? pieceColor(5) : pieceColor(6), ink(), sq, blinkFor(p * 7 + 3, 0), moodFor(p), (float)t);
     }
 
-    void centerCard(float y, float h) { panelBox(FX - 70, y, W * C + 140, h); }
+    void centerCard(float y, float h) {
+        g.rect(0, 0, SW, SH, withA(th().bg, 150));
+        panelBox(FX - 110, y, W * C + 220, h);
+    }
 
     void drawGame() {
         const Theme& T = th();
@@ -981,18 +1055,22 @@ struct App {
         drawField(sx, sy);
 
         int me = viewer, op = 1 - viewer;
-        drawPlayerPanel(me, FX - 300, FY + 2);
-        drawPlayerPanel(op, FX + W * C + 86, SH - FY - 406);
-        drawMascot(me, FX - 193, SH - 34, 170);
-        drawMascot(op, FX + W * C + 193, 236, 170);
+        const float gap = 18 + 26;                          // frame + breathing room
+        float lpx = FX - gap - PANEL_W, rpx = FX + W * C + gap;
+        drawPlayerPanel(me, lpx, FY + 4);
+        drawPlayerPanel(op, rpx, SH - FY - 4 - PANEL_H);
+        drawMascot(me, lpx + PANEL_W / 2, SH - 30, 160);
+        drawMascot(op, rpx + PANEL_W / 2, SH - FY - 4 - PANEL_H - 48, 160);
 
-        if (mode == M_HOST || mode == M_CLIENT) prompts({{"START", "FORFEIT"}}, SH - 46);
-        else prompts({{"START", "PAUSE"}}, SH - 46);
+        if (mode == M_HOST || mode == M_CLIENT) prompts({{"START", "FORFEIT"}}, 30);
+        else prompts({{"START", "PAUSE"}}, 30);
 
         for (auto& f : texts) {
             float a = f.t < 1.0f ? 1.0f : 1.0f - (f.t - 1.0f) / 0.3f;
             float pop = f.t < 0.12f ? 0.6f + f.t / 0.12f * 0.5f : 1.0f + 0.1f * std::max(0.0f, 0.25f - f.t);
             float size = f.scale * 8 * pop;
+            float fw = g.measure(f.s.c_str(), size, F_DISPLAY);
+            if (fw > W * C + 30) size *= (W * C + 30) / fw;
             TextStyle st; st.font = F_DISPLAY; st.fill = withA(f.c, (uint8_t)(255 * a));
             st.outline = withA(ink(), (uint8_t)(255 * a)); st.outlineW = size * 0.2f; st.shadow = size * 0.14f;
             g.print(f.x, f.y, size, st, f.s.c_str(), AL_CENTER);
@@ -1011,39 +1089,37 @@ struct App {
         }
 
         if (s.phase == PH_OVER) {
-            centerCard(250, 290);
+            centerCard(236, 330);
             const char* hd;
             bool good = s.winner == viewer || mode == M_LOCAL;
             if (s.winner == 2) hd = "DRAW!";
             else if (mode == M_LOCAL) hd = s.winner == 0 ? "P1 WINS!" : "P2 WINS!";
             else hd = s.winner == viewer ? "YOU WIN!" : "YOU LOSE";
-            head(mid, 282, 44, good ? T.pop : T.danger, hd);
+            head(mid, 260, 44, good ? T.pop : T.danger, hd);
             const char* why = s.reason == 1 ? "OPPONENT LEFT" : s.reason == 2 ? "BY FORFEIT" : "";
-            body(mid, 348, 15, T.muted, why, AL_CENTER);
+            body(mid, 332, 15, T.muted, why, AL_CENTER);
             bool canRematch = !(mode == M_HOST && peerGone);
             if (canRematch) {
                 const char* r = s.pl[viewer].ready ? "WAITING FOR THEM..." : "PLAY AGAIN";
                 if (mode == M_LOCAL) r = (s.pl[0].ready || s.pl[1].ready) ? "BOTH PRESS A..." : "PLAY AGAIN";
-                button(mid, 384, 250, r, !s.pl[viewer].ready);
+                button(mid, 372, 250, r, !s.pl[viewer].ready);
                 if (mode != M_LOCAL && s.pl[1 - viewer].ready && !s.pl[viewer].ready)
-                    body(mid, 458, 15, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
+                    body(mid, 450, 15, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
             }
-            prompts({{"A", "REMATCH"}, {"B", "MENU"}}, 492);
+            prompts({{"A", "REMATCH"}, {"B", "MENU"}}, 512, mid, AL_CENTER);
         }
 
         if (paused) {
-            g.rect(0, 0, SW, SH, withA(T.bg, 170));
             centerCard(220, 330);
             head(mid, 248, 40, white, "PAUSED");
             static const char* items[3] = {"RESUME", "RESTART", "QUIT TO MENU"};
             for (int i = 0; i < 3; ++i) button(mid, 320 + i * 72, 260, items[i], i == pauseSel);
         }
         if (forfeitAsk) {
-            g.rect(0, 0, SW, SH, withA(T.bg, 140));
             centerCard(280, 210);
             head(mid, 310, 36, white, "GIVE UP?");
-            body(mid, 372, 15, T.text, "THE OTHER PLAYER WINS THIS ROUND", AL_CENTER);
-            prompts({{"A", "FORFEIT"}, {"B", "KEEP PLAYING"}}, 432);
+            body(mid, 374, 14, T.text, "THE OTHER PLAYER WINS THIS ROUND", AL_CENTER);
+            prompts({{"A", "FORFEIT"}, {"B", "KEEP PLAYING"}}, 434, mid, AL_CENTER);
         }
     }
 
@@ -1135,12 +1211,17 @@ struct App {
     void drawSettings() {
         drawBackground();
         banner("SETTINGS", pieceColor(4));
-        std::string items[4] = {
+        std::string items[5] = {
             std::string("THEME:  ") + (cfg.theme ? "DARK" : "LIGHT"),
-            std::string("SOUND:  ") + (cfg.sound ? "ON" : "OFF"),
+            std::string("MUSIC:  ") + (cfg.music ? "ON" : "OFF"),
+            std::string("SOUND FX:  ") + (cfg.sound ? "ON" : "OFF"),
             std::string("CPU:  ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD"),
             "BACK"};
-        for (int i = 0; i < 4; ++i) button(SW / 2, 190 + i * 86, 460, items[i].c_str(), i == sel);
+        for (int i = 0; i < 5; ++i) button(SW / 2, 160 + i * 84, 460, items[i].c_str(), i == sel);
+        if (musicReady) {
+            std::string nowPlaying = "MUSIC: " + std::to_string(titleTracks.size() + battleTracks.size()) + " TRACKS  (ADD YOUR OWN IN THE MUSIC FOLDER)";
+            body(SW / 2, 600, 14, th().muted, nowPlaying.c_str(), AL_CENTER);
+        }
         prompts({{"< >", "CHANGE"}, {"B", "BACK"}});
     }
 
@@ -1234,6 +1315,26 @@ struct App {
         g.init(ren);
         au.init();
         au.enabled = cfg.sound;
+        {
+            std::string base;
+            if (char* bp = SDL_GetBasePath()) { base = bp; SDL_free(bp); }
+            std::string userDir = net::configDir() + "/music";
+#ifdef _WIN32
+            CreateDirectoryA(userDir.c_str(), nullptr);
+#else
+            mkdir(userDir.c_str(), 0755);
+#endif
+            musicLoader = std::thread([this, base, userDir]() {
+                std::vector<TrackPtr> t, b;
+                music::loadFolder(base + "music", t, b);
+                music::loadFolder(userDir, t, b);
+                t.push_back(music::titleTheme());
+                b.push_back(music::battleTheme());
+                b.push_back(music::battleTheme2());
+                titleTracks = t; battleTracks = b;
+                musicReady = true;
+            });
+        }
         for (int i = 0; i < SDL_NumJoysticks(); ++i) openPad(i);
 
         if (opt.host) beginHost();
@@ -1280,6 +1381,7 @@ struct App {
             }
             leaveMatch();
         }
+        if (musicLoader.joinable()) musicLoader.join();
         au.shutdown();
         g.destroy();
         SDL_DestroyRenderer(ren);
@@ -1318,6 +1420,26 @@ static int selftest(int games) {
     return 0;
 }
 
+// writes the built-in tunes as 16-bit WAV files (handy for previewing them)
+static int exportMusic(const std::string& dir) {
+    TrackPtr ts[3] = {music::titleTheme(), music::battleTheme(), music::battleTheme2()};
+    for (auto& t : ts) {
+        std::string path = dir + "/" + t->name + ".wav";
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) return 1;
+        uint32_t frames = (uint32_t)(t->pcm.size() / 2), data = frames * 4, riff = 36 + data, fmt = 16, rate = 44100, br = rate * 4;
+        uint16_t pcm = 1, ch = 2, ba = 4, bits = 16;
+        fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fmt, 4, 1, f);
+        fwrite(&pcm, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&rate, 4, 1, f); fwrite(&br, 4, 1, f);
+        fwrite(&ba, 2, 1, f); fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&data, 4, 1, f);
+        float peak = 0;
+        for (float v : t->pcm) { peak = std::max(peak, std::fabs(v)); int16_t q = (int16_t)std::lround(std::max(-1.0f, std::min(1.0f, v)) * 32767); fwrite(&q, 2, 1, f); }
+        fclose(f);
+        printf("%s  %.1fs  peak %.2f\n", path.c_str(), frames / 44100.0, peak);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     App app;
     for (int i = 1; i < argc; ++i) {
@@ -1334,6 +1456,8 @@ int main(int argc, char** argv) {
         else if (a == "--selftest") return selftest(atoi(next().c_str()));
         else if (a == "--screenshot") { app.opt.shot = next(); app.opt.shotAt = atof(next().c_str()); }
         else if (a == "--screen") app.opt.screen = next();
+        else if (a == "--force") app.opt.force = next();
+        else if (a == "--export-music") return exportMusic(next());
         else if (a == "--dark") app.opt.theme = 1;
         else if (a == "--light") app.opt.theme = 0;
         else if (a == "--help" || a == "-h") {
