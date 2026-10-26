@@ -14,6 +14,7 @@ jobs:
   linux:
     name: Linux / Steam Deck
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -35,12 +36,16 @@ jobs:
   windows:
     name: Windows
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake mingw-w64 zip
+          sudo apt-get install -y --no-install-recommends cmake zip g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64
       - name: Build
         run: ./tools/build-windows.sh
       - uses: actions/upload-artifact@v4
