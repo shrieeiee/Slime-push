@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux / Steam Deck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libxfixes-dev libwayland-dev libxkbcommon-dev wayland-protocols libasound2-dev \
+            libpulse-dev libudev-dev libdbus-1-dev libegl-dev libgl-dev libdrm-dev libgbm-dev libdecor-0-dev
+          pip install --break-system-packages ziglang==0.13.0
+      - name: Build
+        run: ./tools/build-linux.sh
+      - name: Self-test
+        run: ./build-linux/SlimePush --selftest 5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlimePush-linux-steamdeck
+          path: dist/SlimePush-linux-steamdeck.tar.gz
+
+  windows:
+    name: Windows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake mingw-w64 zip
+      - name: Build
+        run: ./tools/build-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlimePush-windows
+          path: dist/SlimePush-windows.zip
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Slime Push $GITHUB_REF_NAME" --notes "Steam Deck / Linux and Windows builds. They play each other over LAN."
+          gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
