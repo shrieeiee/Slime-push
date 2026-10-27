@@ -35,19 +35,39 @@ jobs:
 
   windows:
     name: Windows
-    runs-on: ubuntu-24.04
+    # Built with Microsoft's own compiler on Windows: MSVC builds trip Defender's
+    # machine-learning heuristics far less often than MinGW cross-compiles.
+    runs-on: windows-2022
     timeout-minutes: 30
+    env:
+      SDL_VER: 2.30.9
     steps:
       - uses: actions/checkout@v4
-      - name: Install MinGW
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Get SDL2 (official Visual C++ package)
+        shell: pwsh
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake zip g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64
+          $u = "https://github.com/libsdl-org/SDL/releases/download/release-$env:SDL_VER/SDL2-devel-$env:SDL_VER-VC.zip"
+          Invoke-WebRequest $u -OutFile sdl.zip
+          Expand-Archive sdl.zip -DestinationPath deps
       - name: Build
-        run: ./tools/build-windows.sh
+        shell: pwsh
+        run: |
+          cmake -S . -B build-windows -G "Visual Studio 17 2022" -A x64 -DSDL2_DIR="$PWD/deps/SDL2-$env:SDL_VER/cmake"
+          cmake --build build-windows --config Release --parallel
+      - name: Self-test
+        shell: pwsh
+        run: |
+          Copy-Item "deps/SDL2-$env:SDL_VER/lib/x64/SDL2.dll" build-windows/Release/
+          $p = Start-Process build-windows/Release/SlimePush.exe -ArgumentList "--selftest","3" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/SlimePush -Force | Out-Null
+          Copy-Item build-windows/Release/SlimePush.exe, build-windows/Release/SDL2.dll, README.md dist/SlimePush/
+          Copy-Item "deps/SDL2-$env:SDL_VER/README-SDL.txt" dist/SlimePush/ -ErrorAction SilentlyContinue
+          Compress-Archive dist/SlimePush dist/SlimePush-windows.zip -Force
+          Get-FileHash dist/SlimePush/SlimePush.exe -Algorithm SHA256 | Format-List
       - uses: actions/upload-artifact@v4
         with:
           name: SlimePush-windows

@@ -1,20 +1,31 @@
+#include <winver.h>
 1 ICON "slimepush.ico"
-1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,2,0,0
+PRODUCTVERSION 1,2,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0x0L
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
-    BLOCK "040904b0"
+    BLOCK "080904b0"
     BEGIN
-      VALUE "FileDescription", "Slime Push"
+      VALUE "CompanyName", "shrieeiee"
+      VALUE "FileDescription", "Slime Push - slime block puzzle game"
+      VALUE "FileVersion", "1.2.0.0"
+      VALUE "InternalName", "SlimePush"
+      VALUE "LegalCopyright", "Copyright (C) 2026 shrieeiee"
+      VALUE "OriginalFilename", "SlimePush.exe"
       VALUE "ProductName", "Slime Push"
-      VALUE "FileVersion", "1.0.0"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", "1.2.0.0"
+      VALUE "Comments", "Open source: https://github.com/shrieeiee/Slime-push"
     END
   END
   BLOCK "VarFileInfo"
   BEGIN
-    VALUE "Translation", 0x409, 1200
+    VALUE "Translation", 0x809, 1200
   END
 END
