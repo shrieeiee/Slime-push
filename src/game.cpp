@@ -79,9 +79,21 @@ static float framesPerRow(int level) { return std::max(1.0f, 14.0f * std::pow(0.
 // ---------------------------------------------------------------- game
 uint8_t Game::newId() { if (++idCounter == 0) idCounter = 1; return idCounter; }
 
-void Game::reset(uint32_t seed) {
+void Game::nextRound(uint32_t seed) {
+    uint8_t wins0 = s.setWins[0], wins1 = s.setWins[1], target = s.setTarget, rnd = s.round;
+    int st0 = s.pl[0].startLevel, st1 = s.pl[1].startLevel;
+    if (s.setOver) { wins0 = wins1 = 0; rnd = 0; }
+    uint32_t frame = s.frame;
+    reset(seed, st0, st1, target);
+    s.setWins[0] = wins0; s.setWins[1] = wins1; s.round = (uint8_t)(rnd + 1);
+    s.frame = frame;
+}
+
+void Game::reset(uint32_t seed, int start0, int start1, int setTarget) {
     if (!shInit) initShapes();
     s = State{};
+    s.setTarget = (uint8_t)std::max(1, std::min(3, setTarget));
+    s.round = 1;
     s.phase = PH_COUNTDOWN;
     s.phaseTimer = 180;
     s.winner = -1;
@@ -99,6 +111,8 @@ void Game::reset(uint32_t seed) {
         for (int i = 0; i < NEXT_SHOWN; ++i) pv[p].queue[i] = nextFromBag(p);
         PlayerView& v = s.pl[p];
         v.type = 0; v.active = 0; v.hold = -1; v.alive = 1;
+        v.startLevel = (uint8_t)std::max(1, std::min(9, p == 0 ? start0 : start1));
+        v.level = v.startLevel;
         for (int i = 0; i < NEXT_SHOWN; ++i) v.next[i] = pv[p].queue[i];
     }
 }
@@ -267,7 +281,7 @@ void Game::clearLines(int p) {
     v.lastClearN = (uint8_t)std::min(n, 4);
     v.evClear++;
     static const int pts[5] = {0, 100, 300, 500, 800};
-    v.score += pts[std::min(n, 4)] * s.level;
+    v.score += pts[std::min(n, 4)] * v.level;
     v.lines = (int16_t)(v.lines + n);
     int k = pushRows(n);
     if (k > 0) push(p, k);
@@ -323,6 +337,8 @@ void Game::checkEnd() {
     s.phase = PH_OVER;
     s.phaseTimer = 0;
     s.winner = (int8_t)((!a0 && !a1) ? 2 : (a0 ? 0 : 1));
+    if (s.winner == 0 || s.winner == 1) s.setWins[s.winner]++;
+    s.setOver = (s.setWins[0] >= s.setTarget || s.setWins[1] >= s.setTarget || s.reason != 0) ? 1 : 0;
     s.pl[0].active = s.pl[1].active = 0;
     s.pl[0].ready = s.pl[1].ready = 0;
 }
@@ -343,7 +359,9 @@ void Game::step(const Input in[2]) {
         return;
     }
     playFrames++;
-    s.level = (uint8_t)std::min(15u, 1u + playFrames / (60u * 30u));
+    for (int p = 0; p < 2; ++p)
+        s.pl[p].level = (uint8_t)std::min(15u, s.pl[p].startLevel + playFrames / (60u * 30u));
+    s.level = std::max(s.pl[0].level, s.pl[1].level);
 
     for (int p = 0; p < 2; ++p) {
         if (in[p].pressed & A_FORFEIT) { forfeit(p); return; }
@@ -389,7 +407,7 @@ void Game::step(const Input in[2]) {
         }
 
         // gravity
-        float g = 1.0f / framesPerRow(s.level);
+        float g = 1.0f / framesPerRow(v.level);
         bool soft = (I.held & A_SOFT) != 0;
         if (soft) g = std::max(g, 0.5f);
         q.grav += g;
@@ -412,7 +430,8 @@ void Game::step(const Input in[2]) {
 }
 
 // ---------------------------------------------------------------- bot
-static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0, bool* ok, bool strategic) {
+static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0, bool* ok, bool strategic, int* linesOut) {
+    *linesOut = 0;
     *ok = false;
     if (g.collides(p, type, rot, x, y0)) return -1000000;
     int y = y0;
@@ -441,6 +460,7 @@ static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0,
         for (int cx = 0; cx < W; ++cx) if (!b[ly][cx]) { full[ly] = false; break; }
         if (full[ly]) ++lines;
     }
+    *linesOut = lines;
     if (lines) {
         bool nb[H][W];
         std::memset(nb, 0, sizeof(nb));
@@ -523,17 +543,19 @@ static const Persona PERSONAS[4] = {
 void Bot::plan(const Game& g, int p) {
     const Persona& P = PERSONAS[std::max(0, std::min(3, level))];
     const PlayerView& v = g.s.pl[p];
-    int bestScore = -2000000000, bestRot = v.rot, bestX = v.x;
+    int bestScore = -2000000000, bestRot = v.rot, bestX = v.x, bestLines = 0;
     std::normal_distribution<float> jitter(0.0f, (float)std::max(1, P.noise));
     for (int r = 0; r < 4; ++r)
         for (int x = -3; x < W; ++x) {
             bool ok;
-            int sc = evalPlacement(g, p, v.type, r, x, std::max<int>(v.y, 0), &ok, P.strategic);
+            int lines = 0;
+            int sc = evalPlacement(g, p, v.type, r, x, std::max<int>(v.y, 0), &ok, P.strategic, &lines);
             if (!ok) continue;
             if (P.noise) sc += (int)jitter(rng);
-            if (sc > bestScore) { bestScore = sc; bestRot = r; bestX = x; }
+            if (sc > bestScore) { bestScore = sc; bestRot = r; bestX = x; bestLines = lines; }
         }
     tRot = bestRot;
+    planLines = bestLines;
     // route: optionally overshoot by one column first, like a slightly-too-long press
     nWay = 0; way = 0;
     int dir = bestX > v.x ? 1 : bestX < v.x ? -1 : 0;
@@ -556,8 +578,8 @@ Input Bot::think(const Game& g, int p) {
         in.pressed = in.held = A_READY;
         return in;
     }
-    if (g.s.phase != PH_PLAY) { timer = range(40, 90); return in; }
-    if (!v.active) { softHeld = false; return in; }
+    if (g.s.phase != PH_PLAY) { timer = range(40, 90); planLines = 0; return in; }
+    if (!v.active) { softHeld = false; planLines = 0; return in; }
 
     if (v.evSpawn != lastSpawn) {
         lastSpawn = v.evSpawn;

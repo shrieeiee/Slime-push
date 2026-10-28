@@ -38,7 +38,11 @@ struct Config {
     int theme = 0;       // 0 light, 1 dark
     bool sound = true;
     bool music = true;
+    bool rumble = true;
     int cpu = 1;
+    int speed = 1;       // starting speed 1-9 (handicap)
+    int sets = 1;        // rounds to win: 1 single game, 2 best of 3, 3 best of 5
+    std::string name;    // empty = automatic from the computer name
     uint32_t hostId = 0;
     std::string path;
     void load() {
@@ -46,13 +50,23 @@ struct Config {
         path = dir + "/settings.txt";
         FILE* f = fopen(path.c_str(), "r");
         if (f) {
-            char k[64]; unsigned v;
-            while (fscanf(f, "%63s %u", k, &v) == 2) {
-                if (!strcmp(k, "theme")) theme = (int)v & 1;
-                else if (!strcmp(k, "sound")) sound = v != 0;
-                else if (!strcmp(k, "music")) music = v != 0;
-                else if (!strcmp(k, "cpu")) cpu = std::min(2, (int)v);
-                else if (!strcmp(k, "id")) hostId = v;
+            char line[256];
+            while (fgets(line, sizeof(line), f)) {
+                std::string l = line;
+                while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+                size_t sp = l.find(' ');
+                if (sp == std::string::npos) continue;
+                std::string k = l.substr(0, sp), v = l.substr(sp + 1);
+                unsigned n = (unsigned)strtoul(v.c_str(), nullptr, 10);
+                if (k == "theme") theme = (int)n & 1;
+                else if (k == "sound") sound = n != 0;
+                else if (k == "music") music = n != 0;
+                else if (k == "rumble") rumble = n != 0;
+                else if (k == "cpu") cpu = std::min(2, (int)n);
+                else if (k == "speed") speed = std::max(1, std::min(9, (int)n));
+                else if (k == "sets") sets = std::max(1, std::min(3, (int)n));
+                else if (k == "name") name = cleanName(v);
+                else if (k == "id") hostId = n;
             }
             fclose(f);
         }
@@ -61,8 +75,24 @@ struct Config {
     void save() {
         FILE* f = fopen(path.c_str(), "w");
         if (!f) return;
-        fprintf(f, "theme %d\nsound %d\nmusic %d\ncpu %d\nid %u\n", theme, sound ? 1 : 0, music ? 1 : 0, cpu, hostId);
+        fprintf(f, "theme %d\nsound %d\nmusic %d\nrumble %d\ncpu %d\nspeed %d\nsets %d\nid %u\n",
+                theme, sound ? 1 : 0, music ? 1 : 0, rumble ? 1 : 0, cpu, speed, sets, hostId);
+        if (!name.empty()) fprintf(f, "name %s\n", name.c_str());
         fclose(f);
+    }
+    // names: A-Z 0-9 - _ and single spaces, at most 12 characters
+    static std::string cleanName(const std::string& in) {
+        std::string out;
+        for (char c : in) {
+            c = (char)toupper((unsigned char)c);
+            bool ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ' ';
+            if (!ok) continue;
+            if (c == ' ' && (out.empty() || out.back() == ' ')) continue;
+            out += c;
+            if (out.size() >= 12) break;
+        }
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        return out;
     }
 };
 
@@ -98,7 +128,7 @@ static Input toActions(uint16_t held, uint16_t pressed, bool flipped) {
 struct Particle { float x, y, vx, vy, r, life, max; Col c; };
 struct FloatText { std::string s; float x, y, t; Col c; float scale; };
 
-enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME };
+enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME, SC_NAME };
 enum Mode { M_CPU, M_LOCAL, M_HOST, M_CLIENT };
 
 struct Options {
@@ -110,6 +140,8 @@ struct Options {
     int theme = -1;
     std::string screen;
     std::string force;   // debug: pause / over / forfeit shortly before the screenshot
+    std::string captureFx;  // debug: save frames when a push wave or the CPU warning is on screen
+    int cpuLevel = -1;
 };
 
 struct App {
@@ -166,6 +198,13 @@ struct App {
     int battleIndex = -1;
 
     // fx
+    struct Wave { float y; float t; int dir; int rows; };
+    std::vector<Wave> waves;
+    float shove[2] = {0, 0}, shoveV[2] = {0, 0};   // mascot knock-back (pixels, toward/away from the jar)
+    int peerSpeed = 1;
+    // name editor
+    std::string nameDraft;
+    int nameCur = 0;
     std::vector<Particle> parts;
     std::vector<FloatText> texts;
     float shake = 0;
@@ -176,6 +215,7 @@ struct App {
 
     // ------------------------------------------------------------ setup
     void initName() {
+        if (!cfg.name.empty()) { myName = cfg.name; return; }
         std::string n = net::computerName();
         if (n.empty()) n = "SLIME";
         if (n.size() > 12) n = n.substr(0, 12);
@@ -187,6 +227,17 @@ struct App {
     }
 
     void say(const std::string& s, double secs = 3.0) { toast = s; toastUntil = now + secs; }
+
+    // rumble the controller(s) belonging to player p on this machine
+    void rumble(int p, int low, int high, int ms) {
+        if (!cfg.rumble || pads.empty()) return;
+        auto go = [&](Device& d) { SDL_GameControllerRumble(d.gc, (Uint16)std::min(0xFFFF, low), (Uint16)std::min(0xFFFF, high), (Uint32)ms); };
+        if (mode == M_LOCAL) {
+            if (p < (int)pads.size()) go(pads[(size_t)p]);
+        } else if (p == viewer) {
+            for (auto& d : pads) go(d);
+        }
+    }
 
     // ------------------------------------------------------------ input
     void openPad(int index) {
@@ -210,12 +261,17 @@ struct App {
         if (k[SDL_SCANCODE_DOWN]) h |= R_DOWN;
         if (k[SDL_SCANCODE_LEFT]) h |= R_LEFT;
         if (k[SDL_SCANCODE_RIGHT]) h |= R_RIGHT;
-        if (k[SDL_SCANCODE_X]) h |= R_A;
-        if (k[SDL_SCANCODE_Z]) h |= R_B;
-        if (k[SDL_SCANCODE_C] || k[SDL_SCANCODE_LSHIFT]) h |= R_LB;
-        if (k[SDL_SCANCODE_SPACE]) h |= R_HARD;
-        if (k[SDL_SCANCODE_RETURN]) h |= R_START;
-        if (k[SDL_SCANCODE_ESCAPE] || k[SDL_SCANCODE_BACKSPACE]) h |= R_BACK;
+        if (sc == SC_NAME) {   // the keyboard types letters here; only arrows, Enter and Esc navigate
+            if (k[SDL_SCANCODE_RETURN]) h |= R_START;
+            if (k[SDL_SCANCODE_ESCAPE]) h |= R_BACK;
+        } else {
+            if (k[SDL_SCANCODE_X]) h |= R_A;
+            if (k[SDL_SCANCODE_Z]) h |= R_B;
+            if (k[SDL_SCANCODE_C] || k[SDL_SCANCODE_LSHIFT]) h |= R_LB;
+            if (k[SDL_SCANCODE_SPACE]) h |= R_HARD;
+            if (k[SDL_SCANCODE_RETURN]) h |= R_START;
+            if (k[SDL_SCANCODE_ESCAPE] || k[SDL_SCANCODE_BACKSPACE]) h |= R_BACK;
+        }
         kb.held = h;
         for (auto& p : pads) {
             p.prev = p.held;
@@ -262,18 +318,21 @@ struct App {
     // ------------------------------------------------------------ match control
     void startMatch(Mode m) {
         mode = m;
-        game.reset(rng());
+        int s0 = cfg.speed, s1 = cfg.speed;
+        if (m == M_CPU) s1 = 1;
+        if (m == M_HOST) s1 = peerSpeed;
+        game.reset(rng(), s0, s1, cfg.sets);
         pickBattleTrack();
         botFor[0] = opt.autoplay;
         botFor[1] = (m == M_CPU);
         bot[0] = Bot(); bot[1] = Bot();
-        bot[0].level = 3; bot[1].level = cfg.cpu;
+        bot[0].level = 3; bot[1].level = opt.cpuLevel >= 0 ? opt.cpuLevel : cfg.cpu;
         viewer = (m == M_CLIENT) ? 1 : 0;
         view = game.s; prev = view;
         haveView = (m != M_CLIENT);
         paused = forfeitAsk = peerGone = false;
         sawPlay = false;
-        parts.clear(); texts.clear();
+        parts.clear(); texts.clear(); waves.clear();
         inrecv.reset();
         sc = SC_GAME;
         lastRecv = now;
@@ -339,6 +398,7 @@ struct App {
                 const net::Join* j = (const net::Join*)buf;
                 char nm[25]; memcpy(nm, j->name, 24); nm[24] = 0;
                 peer = from; peerOk = true; nonce = j->nonce; peerName = nm;
+                peerSpeed = std::max(1, std::min(9, (int)j->speed));
                 net::Welcome w{}; net::fillHdr(w.h, net::P_WELCOME);
                 strncpy(w.name, myName.c_str(), sizeof(w.name)); w.nonce = nonce;
                 gs.send(&w, sizeof(w), peer);
@@ -367,6 +427,7 @@ struct App {
             if (now - lastJoinSend > 0.25) {
                 net::Join j{}; net::fillHdr(j.h, net::P_JOIN);
                 strncpy(j.name, myName.c_str(), sizeof(j.name)); j.nonce = nonce;
+                j.speed = (uint8_t)cfg.speed;
                 gs.send(&j, sizeof(j), peer); lastJoinSend = now;
             }
             unsigned char buf[2048]; net::Addr from{}; int n;
@@ -524,11 +585,13 @@ struct App {
         if (game.s.phase == PH_OVER) {
             for (int p = 0; p < 2; ++p) if (in[p].pressed & A_READY) game.s.pl[p].ready = 1;
             if (mode == M_HOST && peerGone) game.s.pl[1].ready = 0;
-            if (game.s.pl[0].ready && game.s.pl[1].ready && game.s.phaseTimer > 45) {
-                uint32_t keepFrame = game.s.frame;
-                game.reset(rng());
-                game.s.frame = keepFrame;
+            bool both = game.s.pl[0].ready && game.s.pl[1].ready && game.s.phaseTimer > 45;
+            bool autoNext = !game.s.setOver && game.s.phaseTimer > 300 && !(mode == M_HOST && peerGone);
+            if (both || autoNext) {
+                if (game.s.setOver) pickBattleTrack();
+                game.nextRound(rng());
                 sawPlay = false;
+                waves.clear();
                 for (auto& b : bot) { int l = b.level; b = Bot(); b.level = l; }
             }
         }
@@ -544,6 +607,11 @@ struct App {
 
     // ------------------------------------------------------------ effects from state changes
     int srow(int globalRow) const { return viewer == 0 ? globalRow : H - 1 - globalRow; }
+    float lineY(int center) const { return viewer == 0 ? center * C : (H - center) * C; }
+    float mascotX(bool mine) const {
+        float lpx = FX - 44 - 250, rpx = FX + W * C + 44;
+        return mine ? lpx + 125 : rpx + 125;
+    }
 
     void spawnSplash(float x, float y, Col c, int n, float speed) {
         std::uniform_real_distribution<float> U(-1.f, 1.f);
@@ -567,6 +635,7 @@ struct App {
         if (s.phase == PH_OVER && o.phase != PH_OVER) {
             bool won = s.winner == viewer || (mode == M_LOCAL && s.winner != 2);
             au.play(won ? S_WIN : S_LOSE);
+            if (s.winner == 0 || s.winner == 1) rumble(1 - s.winner, 0xFFFF, 0xA000, 600);
             if (s.winner == 0 || s.winner == 1) excite[s.winner] = 99;
         }
         for (int p = 0; p < 2; ++p) {
@@ -579,7 +648,7 @@ struct App {
             if (a.evRotate != b.evRotate && mine) au.play(S_ROTATE, 0.8f, pan);
             if (a.evLand != b.evLand && mine) au.play(S_LAND, 0.7f, pan);
             if (a.evHold != b.evHold && mine) au.play(S_HOLD, 0.8f, pan);
-            if (a.evLock != b.evLock) { au.play(S_LOCK, vol, pan); squashV[p] += 2.5f; }
+            if (a.evLock != b.evLock) { au.play(S_LOCK, vol, pan); squashV[p] += 2.5f; if (mine) rumble(p, 0x2000, 0x1000, 35); }
             if (a.evVanish != b.evVanish) {
                 au.play(S_VANISH, vol, pan);
                 float y = (p == viewer) ? FY + H * C - 30 : FY + 30;
@@ -599,15 +668,31 @@ struct App {
                     texts.push_back({names[std::min(n, 4)], FX + W * C / 2, y, 0, hex(0xffffff), 3});
                 }
                 squashV[p] += 3;
+                if (mine) rumble(p, 0x3000 + n * 0x1800, 0x2000 + n * 0x1000, 70 + n * 30);
             }
             if (a.evPush != b.evPush) {
+                int k = a.lastPush;
                 au.play(p == viewer || mode == M_LOCAL ? S_PUSH : S_PUSHED, 1.0f, pan);
-                shake = 10.0f + a.lastPush * 3.0f;
+                shake = std::max(shake, 8.0f + k * 5.0f);
                 excite[p] = 1.6f;
-                squashV[1 - p] -= 5;
-                char buf[32]; snprintf(buf, sizeof(buf), "PUSH +%d", a.lastPush);
-                float y = FY + srow(s.center) * C;
-                texts.push_back({buf, FX + W * C / 2, y - 24, 0, th().pop, 4});
+                squashV[1 - p] -= 5 + k * 1.5f;
+                squashV[p] += 2 + k;
+                shoveV[1 - p] -= 260 + k * 120;    // knocked back away from the jar
+                shoveV[p] += 160 + k * 50;         // lunges in
+                float ly = FY + lineY(s.center);
+                // the wave travels toward the side that got pushed
+                int toward = (srow(toGlobal(1 - p, 0)) == 0) ? -1 : 1;
+                waves.push_back({ly, 0, toward, k});
+                char buf[32];
+                if (k >= 4) snprintf(buf, sizeof(buf), "MEGA PUSH!");
+                else snprintf(buf, sizeof(buf), "PUSH +%d", k);
+                texts.push_back({buf, FX + W * C / 2, ly + 46, -0.22f, th().pop, k >= 4 ? 5.0f : 4.0f});
+                if (k >= 2) {   // confetti from the pusher's mascot
+                    float mx = (p == viewer) ? mascotX(true) : mascotX(false), my = (p == viewer) ? SH - 90 : 180;
+                    for (int i = 0; i < 10 + k * 8; ++i) spawnSplash(mx, my, pieceColor(1 + (int)(rng() % 7)), 1, 340);
+                }
+                rumble(p, 0x5000 + k * 0x1800, 0x7000 + k * 0x1400, 120 + k * 40);
+                rumble(1 - p, 0x9000 + k * 0x1400, 0x6000 + k * 0x1000, 220 + k * 70);
             }
         }
         prev = view;
@@ -616,7 +701,7 @@ struct App {
     void tickFx(float dt) {
         for (auto& p : parts) { p.life += dt; p.vy += 520 * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
         parts.erase(std::remove_if(parts.begin(), parts.end(), [](const Particle& p) { return p.life >= p.max; }), parts.end());
-        for (auto& f : texts) { f.t += dt; f.y -= 30 * dt; }
+        for (auto& f : texts) { f.t += dt; if (f.t > 0) f.y -= 30 * dt; }
         texts.erase(std::remove_if(texts.begin(), texts.end(), [](const FloatText& f) { return f.t > 1.3f; }), texts.end());
         shake *= std::pow(0.02f, dt);
         for (int p = 0; p < 2; ++p) {
@@ -626,7 +711,13 @@ struct App {
             squash[p] += squashV[p] * dt * 6;
             squash[p] = std::max(-1.2f, std::min(1.2f, squash[p]));
             if (excite[p] > 0 && excite[p] < 50) excite[p] = std::max(0.0f, excite[p] - dt);
+            shoveV[p] += -shove[p] * 120 * dt;
+            shoveV[p] *= std::pow(0.02f, dt);
+            shove[p] += shoveV[p] * dt;
+            shove[p] = std::max(-120.0f, std::min(80.0f, shove[p]));
         }
+        for (auto& w : waves) w.t += dt;
+        waves.erase(std::remove_if(waves.begin(), waves.end(), [](const Wave& w) { return w.t > 0.55f; }), waves.end());
     }
 
     // ------------------------------------------------------------ menus
@@ -651,20 +742,112 @@ struct App {
             }
         }
     }
+    static constexpr int SET_N = 9;
     void tickSettings() {
         uint16_t e = menuPressed();
-        const int N = 5;
-        if (e & R_UP) { sel = (sel + N - 1) % N; au.play(S_MOVE); }
-        if (e & R_DOWN) { sel = (sel + 1) % N; au.play(S_MOVE); }
+        if (e & R_UP) { sel = (sel + SET_N - 1) % SET_N; au.play(S_MOVE); }
+        if (e & R_DOWN) { sel = (sel + 1) % SET_N; au.play(S_MOVE); }
         int d = (e & R_RIGHT) ? 1 : (e & R_LEFT) ? -1 : (e & R_A) ? 1 : 0;
-        if (d && sel < 4) {
-            if (sel == 0) cfg.theme ^= 1;
-            if (sel == 1) cfg.music = !cfg.music;
-            if (sel == 2) { cfg.sound = !cfg.sound; au.enabled = cfg.sound; }
-            if (sel == 3) cfg.cpu = (cfg.cpu + 3 + d) % 3;
-            cfg.save(); au.play(S_SELECT);
+        bool changed = true;
+        if (d) switch (sel) {
+            case 0: cfg.theme ^= 1; break;
+            case 1: cfg.music = !cfg.music; break;
+            case 2: cfg.sound = !cfg.sound; au.enabled = cfg.sound; break;
+            case 3: cfg.rumble = !cfg.rumble; if (cfg.rumble) for (auto& pd : pads) SDL_GameControllerRumble(pd.gc, 0x8000, 0x8000, 200); break;
+            case 4: cfg.cpu = (cfg.cpu + 3 + d) % 3; break;
+            case 5: cfg.speed = (cfg.speed - 1 + 9 + d) % 9 + 1; break;
+            case 6: cfg.sets = (cfg.sets - 1 + 3 + d) % 3 + 1; break;
+            case 7:
+                changed = false;
+                if (e & R_A) { nameDraft = myName; nameCur = 0; sc = SC_NAME; au.play(S_SELECT); return; }
+                break;
+            default: changed = false; break;
         }
-        if ((e & (R_B | R_BACK)) || (sel == 4 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
+        if (d && changed) { cfg.save(); au.play(S_SELECT); }
+        if ((e & (R_B | R_BACK)) || (sel == SET_N - 1 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
+    }
+
+    // ---- name editor: a console-style letter grid
+    static constexpr const char* NAME_KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    static constexpr int NK_COLS = 10, NK_CHARS = 38, NK_ACTIONS = 3;   // + SPACE, DELETE, DONE
+    void finishName(bool save) {
+        if (save) {
+            std::string n = Config::cleanName(nameDraft);
+            cfg.name = n;
+            cfg.save();
+            initName();
+            say(n.empty() ? "NAME SET BACK TO AUTOMATIC" : "NAME SAVED");
+        }
+        sc = SC_SETTINGS; sel = 7;
+    }
+    void nameType(char c) {
+        if (nameDraft.size() >= 12) return;
+        if (c == ' ' && (nameDraft.empty() || nameDraft.back() == ' ')) return;
+        nameDraft += c;
+        au.play(S_MOVE);
+    }
+    void nameBack() { if (!nameDraft.empty()) { nameDraft.pop_back(); au.play(S_BACK); } }
+    void tickName() {
+        uint16_t e = menuPressed();
+        const int total = NK_CHARS + NK_ACTIONS;
+        int rows = (NK_CHARS + NK_COLS - 1) / NK_COLS;       // letter rows; actions sit on the row below
+        auto rowOf = [&](int i) { return i < NK_CHARS ? i / NK_COLS : rows; };
+        if (e & R_RIGHT) { nameCur = (nameCur + 1) % total; au.play(S_MOVE); }
+        if (e & R_LEFT) { nameCur = (nameCur + total - 1) % total; au.play(S_MOVE); }
+        if (e & (R_DOWN | R_UP)) {
+            int r = rowOf(nameCur), c = nameCur < NK_CHARS ? nameCur % NK_COLS : (nameCur - NK_CHARS) * 4;
+            r = (e & R_DOWN) ? (r + 1) % (rows + 1) : (r + rows) % (rows + 1);
+            if (r == rows) nameCur = NK_CHARS + std::min(NK_ACTIONS - 1, c / 4);
+            else nameCur = std::min(NK_CHARS - 1, r * NK_COLS + c);
+            au.play(S_MOVE);
+        }
+        if (e & R_A) {
+            if (nameCur < NK_CHARS) nameType(NAME_KEYS[nameCur]);
+            else if (nameCur == NK_CHARS) nameType(' ');
+            else if (nameCur == NK_CHARS + 1) nameBack();
+            else { au.play(S_SELECT); finishName(true); return; }
+        }
+        if (e & (R_B | R_X)) {
+            if (nameDraft.empty() && (e & R_B)) { au.play(S_BACK); finishName(false); return; }
+            nameBack();
+        }
+        if (e & R_START) { au.play(S_SELECT); finishName(true); return; }
+        if (e & R_BACK) { au.play(S_BACK); finishName(false); return; }
+    }
+    void drawName() {
+        const Theme& T = th();
+        drawBackground();
+        banner("YOUR NAME", pieceColor(5));
+        // the name field
+        float fw = 520, fx = SW / 2 - fw / 2, fy = 120;
+        g.rrect(fx - 6, fy - 6, fw + 12, 76, 26, border());
+        g.rrect(fx, fy, fw, 64, 20, T.field);
+        std::string shown = nameDraft;
+        float tw = g.measure(shown.c_str(), 30, F_BODY);
+        head(SW / 2, fy + 17, 30, Col{255, 255, 255, 255}, shown.c_str());
+        if ((int)(t * 2) % 2 == 0 && nameDraft.size() < 12) g.rect(SW / 2 + tw / 2 + 6, fy + 14, 5, 36, ink());
+        char cnt[16]; snprintf(cnt, sizeof(cnt), "%d / 12", (int)nameDraft.size());
+        body(fx + fw - 16, fy + 72, 13, T.muted, cnt, AL_RIGHT);
+        // keys
+        float kw = 62, kh = 58, gap = 10;
+        float gx = SW / 2 - (NK_COLS * kw + (NK_COLS - 1) * gap) / 2, gy = 236;
+        for (int i = 0; i < NK_CHARS; ++i) {
+            float x = gx + (i % NK_COLS) * (kw + gap), y = gy + (i / NK_COLS) * (kh + gap);
+            bool on = i == nameCur;
+            g.rrect(x - 4, y - 4 + 5, kw + 8, kh + 8, 18, withA(ink(), 50));
+            g.rrect(x - 4, y - 4, kw + 8, kh + 8, 18, border());
+            g.rrect(x, y, kw, kh, 14, on ? T.pop : T.panel);
+            char ch[2] = {NAME_KEYS[i], 0};
+            if (on) head(x + kw / 2, y + 17, 24, Col{255, 255, 255, 255}, ch, AL_CENTER, F_BODY);
+            else body(x + kw / 2, y + 17, 24, T.text, ch, AL_CENTER);
+        }
+        int rows = (NK_CHARS + NK_COLS - 1) / NK_COLS;
+        static const char* acts[3] = {"SPACE", "DELETE", "DONE"};
+        float aw = (NK_COLS * kw + (NK_COLS - 1) * gap - 2 * 24) / 3;
+        for (int i = 0; i < 3; ++i)
+            button(gx + aw / 2 + i * (aw + 24), gy + rows * (kh + gap) + 14, aw - 20, acts[i], nameCur == NK_CHARS + i, 50);
+        body(SW / 2, 664, 14, T.muted, "LEAVE IT EMPTY AND PRESS DONE TO GO BACK TO THE AUTOMATIC NAME", AL_CENTER);
+        prompts({{"A", "TYPE"}, {"X", "DELETE"}, {"START", "DONE"}, {"B", "BACK"}});
     }
 
     void tick() {
@@ -674,6 +857,7 @@ struct App {
             case SC_HOST: tickHostWait(); break;
             case SC_JOIN: tickJoin(); break;
             case SC_SETTINGS: tickSettings(); break;
+            case SC_NAME: tickName(); break;
             case SC_HELP: if (allPressed() & (R_A | R_B | R_BACK | R_START)) { au.play(S_BACK); sc = SC_TITLE; sel = 4; } break;
             case SC_GAME: tickGame(); if (sc == SC_GAME) effects(); break;
         }
@@ -961,6 +1145,23 @@ struct App {
             }
         }
 
+        for (auto& w : waves) {
+            float k = w.t / 0.55f, a = 1.0f - k;
+            float band = C * (1.5f + w.rows);
+            float yy = w.y + sy + w.dir * k * C * 9;
+            float top = std::min(yy, yy - w.dir * band), h = band;
+            top = std::max(top, y0); float bot = std::min(top + h, y0 + H * C);
+            if (k < 0.25f) g.rect(x0, y0, W * C, H * C, withA(Col{255, 255, 255, 255}, (uint8_t)(70 * (1 - k / 0.25f) * std::min(1, w.rows))));
+            if (bot > top) g.rect(x0, top, W * C, bot - top, withA(T.pop, (uint8_t)(150 * a)));
+            if (yy > y0 && yy < y0 + H * C) {
+                g.rect(x0, yy - 7, W * C, 14, withA(ink(), (uint8_t)(200 * a)));
+                g.rect(x0, yy - 4, W * C, 8, withA(Col{255, 255, 255, 255}, (uint8_t)(255 * a)));
+            }
+            for (int side = 0; side < 2; ++side) {
+                float ex = side ? x0 + W * C + 9 : x0 - 9;
+                g.circle(ex, w.y + sy, 12 + k * (40 + 14 * w.rows), withA(T.pop, (uint8_t)(170 * a)));
+            }
+        }
         for (auto& p : parts) {
             float a = 1.0f - p.life / p.max;
             g.circle(p.x + sx, p.y + sy, p.r + 1.2f, withA(T.slimeInk, (uint8_t)(200 * a)));
@@ -976,7 +1177,7 @@ struct App {
         const float w = PANEL_W, h = PANEL_H;
         Col white{255, 255, 255, 255};
         panelBox(x, y, w, h);
-        std::string name = (mode == M_CPU && p == 1) ? std::string("CPU ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD")
+        std::string name = (mode == M_CPU && p == 1) ? std::string("CPU ") + (bot[1].level == 0 ? "EASY" : bot[1].level == 1 ? "NORMAL" : "HARD")
                          : (mode == M_LOCAL) ? (p == 0 ? "PLAYER 1" : "PLAYER 2")
                          : (p == viewer ? myName : peerName);
         Col pc = p == 0 ? pieceColor(5) : pieceColor(6);
@@ -1005,10 +1206,18 @@ struct App {
             if (mw > lw) sz *= lw / mw;                     // big scores shrink to fit
             head(lx + 2, yy + 20 + (20 - sz) / 2, sz, white, val, AL_LEFT, F_DISPLAY);
         };
-        float sy = top + 122;
+        float sy = top + 116;
         snprintf(buf, sizeof(buf), "%d", v.score); stat(sy, "SCORE", buf);
         snprintf(buf, sizeof(buf), "%d", v.lines); stat(sy + 64, "LINES", buf);
-        snprintf(buf, sizeof(buf), "%d", view.level); stat(sy + 128, "LEVEL", buf);
+        snprintf(buf, sizeof(buf), "%d", v.level); stat(sy + 128, "LEVEL", buf);
+        if (view.setTarget > 1) {           // rounds won in this set
+            float py = y + h - 84;
+            for (int i = 0; i < view.setTarget; ++i) {
+                float cx = lx + 10 + i * 26;
+                g.circle(cx, py, 10, border());
+                g.circle(cx, py, 6.5f, i < view.setWins[p] ? T.pop : T.field);
+            }
+        }
 
         // push lead bar
         int lead = (view.center - H / 2) * (p == 0 ? 1 : -1);
@@ -1032,6 +1241,7 @@ struct App {
     }
 
     void drawMascot(int p, float cx, float by, float w) {
+        cx += shove[p] * ((p == viewer || (mode == M_LOCAL && p == 0)) ? 1.0f : -1.0f);
         float bob = std::sin((float)t * 3 + p * 1.7f) * 0.06f;
         float sq = squash[p] + bob;
         float hop = 0;
@@ -1061,11 +1271,23 @@ struct App {
         drawPlayerPanel(op, rpx, SH - FY - 4 - PANEL_H);
         drawMascot(me, lpx + PANEL_W / 2, SH - 30, 160);
         drawMascot(op, rpx + PANEL_W / 2, SH - FY - 4 - PANEL_H - 48, 160);
+        // the CPU gives its big pushes away with a little "!" (that's your cue to brace)
+        if (mode == M_CPU && view.phase == PH_PLAY && view.pl[1].active && bot[1].intent() >= 2) {
+            int n = std::min(3, bot[1].intent() - 1);
+            float bx = rpx + PANEL_W / 2 + 70 - shove[1], by = SH - FY - 4 - PANEL_H - 200 + std::sin((float)t * 9) * 4;
+            const char* marks[4] = {"", "!", "!!", "!!!"};
+            float bw = 30 + n * 16;
+            g.rrect(bx - bw / 2 - 5, by - 5, bw + 10, 56, 26, border());
+            g.rrect(bx - bw / 2, by, bw, 46, 22, Col{255, 255, 255, 255});
+            g.circle(bx - 14, by + 52, 7, border()); g.circle(bx - 14, by + 52, 4, Col{255, 255, 255, 255});
+            head(bx, by + 10, 26, n >= 2 ? T.danger : T.pop, marks[n]);
+        }
 
         if (mode == M_HOST || mode == M_CLIENT) prompts({{"START", "FORFEIT"}}, 30);
         else prompts({{"START", "PAUSE"}}, 30);
 
         for (auto& f : texts) {
+            if (f.t < 0) continue;     // queued behind another pop-up
             float a = f.t < 1.0f ? 1.0f : 1.0f - (f.t - 1.0f) / 0.3f;
             float pop = f.t < 0.12f ? 0.6f + f.t / 0.12f * 0.5f : 1.0f + 0.1f * std::max(0.0f, 0.25f - f.t);
             float size = f.scale * 8 * pop;
@@ -1084,29 +1306,52 @@ struct App {
             float k = (s.phaseTimer % 60) / 60.0f;
             float size = 90 + 50 * k * k;
             head(mid, FY + H * C / 2 - size / 2, size, T.pop, b);
+            if (s.setTarget > 1) {
+                char rb[24]; snprintf(rb, sizeof(rb), "ROUND %d", s.round);
+                head(mid, FY + H * C / 2 - 130, 26, white, rb);
+            }
         } else if (s.phase == PH_PLAY && sawPlay && s.frame - playStartFrame < 50) {
             head(mid, FY + H * C / 2 - 30, 60, T.pop, "PUSH!");
         }
 
         if (s.phase == PH_OVER) {
             centerCard(236, 330);
-            const char* hd;
             bool good = s.winner == viewer || mode == M_LOCAL;
+            bool inSet = s.setTarget > 1;
+            std::string hd;
+            auto who = [&](int w) { return mode == M_LOCAL ? std::string(w == 0 ? "P1" : "P2") : std::string(w == viewer ? "YOU" : "THEY"); };
             if (s.winner == 2) hd = "DRAW!";
-            else if (mode == M_LOCAL) hd = s.winner == 0 ? "P1 WINS!" : "P2 WINS!";
+            else if (inSet && s.setOver) hd = mode == M_LOCAL ? who(s.winner) + " TAKE THE SET!" : (s.winner == viewer ? "SET WON!" : "SET LOST");
+            else if (mode == M_LOCAL) hd = who(s.winner) + " WINS!";
             else hd = s.winner == viewer ? "YOU WIN!" : "YOU LOSE";
-            head(mid, 260, 44, good ? T.pop : T.danger, hd);
-            const char* why = s.reason == 1 ? "OPPONENT LEFT" : s.reason == 2 ? "BY FORFEIT" : "";
-            body(mid, 332, 15, T.muted, why, AL_CENTER);
-            bool canRematch = !(mode == M_HOST && peerGone);
-            if (canRematch) {
-                const char* r = s.pl[viewer].ready ? "WAITING FOR THEM..." : "PLAY AGAIN";
-                if (mode == M_LOCAL) r = (s.pl[0].ready || s.pl[1].ready) ? "BOTH PRESS A..." : "PLAY AGAIN";
-                button(mid, 372, 250, r, !s.pl[viewer].ready);
-                if (mode != M_LOCAL && s.pl[1 - viewer].ready && !s.pl[viewer].ready)
-                    body(mid, 450, 15, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
+            float hs = 44;
+            if (g.measure(hd.c_str(), hs, F_DISPLAY) > W * C + 180) hs *= (W * C + 180) / g.measure(hd.c_str(), hs, F_DISPLAY);
+            head(mid, 260, hs, good ? T.pop : T.danger, hd.c_str());
+            std::string sub = s.reason == 1 ? "OPPONENT LEFT" : s.reason == 2 ? "BY FORFEIT" : "";
+            if (inSet && s.reason == 0) {
+                int a0 = s.setWins[viewer], a1 = s.setWins[1 - viewer];
+                char tb[64];
+                if (mode == M_LOCAL) snprintf(tb, sizeof(tb), "P1 %d  -  %d P2", s.setWins[0], s.setWins[1]);
+                else snprintf(tb, sizeof(tb), "YOU %d  -  %d THEM", a0, a1);
+                sub = tb;
             }
-            prompts({{"A", "REMATCH"}, {"B", "MENU"}}, 512, mid, AL_CENTER);
+            body(mid, 332, 16, T.text, sub.c_str(), AL_CENTER);
+            bool canRematch = !(mode == M_HOST && peerGone);
+            if (canRematch && inSet && !s.setOver) {
+                int left = std::max(0, (300 - (int)s.phaseTimer) / 60 + 1);
+                char nb[48]; snprintf(nb, sizeof(nb), "ROUND %d IN %d", s.round + 1, left);
+                button(mid, 372, 250, nb, !s.pl[viewer].ready);
+                prompts({{"A", "READY"}, {"B", "MENU"}}, 512, mid, AL_CENTER);
+            } else {
+                if (canRematch) {
+                    const char* r = s.pl[viewer].ready ? "WAITING FOR THEM..." : (inSet ? "NEW SET" : "PLAY AGAIN");
+                    if (mode == M_LOCAL) r = (s.pl[0].ready || s.pl[1].ready) ? "BOTH PRESS A..." : (inSet ? "NEW SET" : "PLAY AGAIN");
+                    button(mid, 372, 250, r, !s.pl[viewer].ready);
+                    if (mode != M_LOCAL && s.pl[1 - viewer].ready && !s.pl[viewer].ready)
+                        body(mid, 450, 15, hex(0x46b98a), "THEY WANT A REMATCH!", AL_CENTER);
+                }
+                prompts({{"A", "REMATCH"}, {"B", "MENU"}}, 512, mid, AL_CENTER);
+            }
         }
 
         if (paused) {
@@ -1118,7 +1363,7 @@ struct App {
         if (forfeitAsk) {
             centerCard(280, 210);
             head(mid, 310, 36, white, "GIVE UP?");
-            body(mid, 374, 14, T.text, "THE OTHER PLAYER WINS THIS ROUND", AL_CENTER);
+            body(mid, 374, 14, T.text, view.setTarget > 1 ? "THE OTHER PLAYER WINS THE SET" : "THE OTHER PLAYER WINS THIS ROUND", AL_CENTER);
             prompts({{"A", "FORFEIT"}, {"B", "KEEP PLAYING"}}, 434, mid, AL_CENTER);
         }
     }
@@ -1211,17 +1456,29 @@ struct App {
     void drawSettings() {
         drawBackground();
         banner("SETTINGS", pieceColor(4));
-        std::string items[5] = {
+        static const char* setNames[3] = {"SINGLE GAME", "BEST OF 3", "BEST OF 5"};
+        std::string items[SET_N] = {
             std::string("THEME:  ") + (cfg.theme ? "DARK" : "LIGHT"),
             std::string("MUSIC:  ") + (cfg.music ? "ON" : "OFF"),
             std::string("SOUND FX:  ") + (cfg.sound ? "ON" : "OFF"),
+            std::string("RUMBLE:  ") + (cfg.rumble ? "ON" : "OFF"),
             std::string("CPU:  ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD"),
+            std::string("STARTING SPEED:  ") + std::to_string(cfg.speed),
+            std::string("MATCH:  ") + setNames[cfg.sets - 1],
+            std::string("NAME:  ") + myName,
             "BACK"};
-        for (int i = 0; i < 5; ++i) button(SW / 2, 160 + i * 84, 460, items[i].c_str(), i == sel);
-        if (musicReady) {
-            std::string nowPlaying = "MUSIC: " + std::to_string(titleTracks.size() + battleTracks.size()) + " TRACKS  (ADD YOUR OWN IN THE MUSIC FOLDER)";
-            body(SW / 2, 600, 14, th().muted, nowPlaying.c_str(), AL_CENTER);
+        for (int i = 0; i < SET_N; ++i) button(SW / 2, 122 + i * 62, 480, items[i].c_str(), i == sel, 46);
+        static const char* hints[SET_N] = {
+            "", "", "", "SHAKES YOUR CONTROLLER ON PUSHES AND CLEARS", "HOW TOUGH THE CPU OPPONENT IS",
+            "YOUR GRAVITY AT THE START. EACH PLAYER PICKS THEIR OWN, SO A STRONG PLAYER CAN GIVE A HEAD START",
+            "THE HOST'S CHOICE IS USED IN LAN BATTLES", "PRESS A TO EDIT. THIS IS WHAT THE OTHER PLAYER SEES", ""};
+        const char* hint = hints[sel];
+        if (!*hint && musicReady && sel <= 1) {
+            static std::string nowPlaying;
+            nowPlaying = std::to_string(titleTracks.size() + battleTracks.size()) + " TRACKS  (ADD YOUR OWN IN THE MUSIC FOLDER)";
+            hint = nowPlaying.c_str();
         }
+        body(SW / 2, 700, 14, th().muted, hint, AL_CENTER);
         prompts({{"< >", "CHANGE"}, {"B", "BACK"}});
     }
 
@@ -1266,6 +1523,7 @@ struct App {
             case SC_HOST: drawHost(); break;
             case SC_JOIN: drawJoin(); break;
             case SC_SETTINGS: drawSettings(); break;
+            case SC_NAME: drawName(); break;
             case SC_HELP: drawHelp(); break;
             case SC_GAME: drawGame(); break;
         }
@@ -1343,6 +1601,7 @@ struct App {
         else if (opt.find || opt.autojoin) beginJoin();
         else if (opt.screen == "settings") sc = SC_SETTINGS;
         else if (opt.screen == "help") sc = SC_HELP;
+        else if (opt.screen == "name") { nameDraft = "SLIMEY"; nameCur = 12; sc = SC_NAME; }
 
         Uint64 freq = SDL_GetPerformanceFrequency(), last = SDL_GetPerformanceCounter();
         Uint64 start = last;
@@ -1354,6 +1613,14 @@ struct App {
                 if (ev.type == SDL_QUIT) running = false;
                 else if (ev.type == SDL_CONTROLLERDEVICEADDED) openPad(ev.cdevice.which);
                 else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) closePad(ev.cdevice.which);
+                else if (ev.type == SDL_KEYDOWN && sc == SC_NAME) {
+                    SDL_Keycode k = ev.key.keysym.sym;
+                    if (k >= SDLK_a && k <= SDLK_z) nameType((char)('A' + (k - SDLK_a)));
+                    else if (k >= SDLK_0 && k <= SDLK_9) nameType((char)('0' + (k - SDLK_0)));
+                    else if (k == SDLK_MINUS) nameType('-');
+                    else if (k == SDLK_SPACE) nameType(' ');
+                    else if (k == SDLK_BACKSPACE) nameBack();
+                }
                 else if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F11) {
                     Uint32 f = SDL_GetWindowFlags(win);
                     SDL_SetWindowFullscreen(win, (f & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -1370,14 +1637,26 @@ struct App {
             if (steps == 6) acc = 0;
             render();
             if (!opt.shot.empty() && !shotDone && now >= opt.shotAt) { screenshot(opt.shot); shotDone = true; }
+            if (!opt.captureFx.empty() && sc == SC_GAME) {
+                static int nWave = 0, nBang = 0; static double lastCap = 0;
+                bool bang = mode == M_CPU && view.phase == PH_PLAY && view.pl[1].active && bot[1].intent() >= 2;
+                bool wave = !waves.empty() && waves.back().t > 0.08f && waves.back().t < 0.2f;
+                if (now - lastCap > 1.0 && ((wave && nWave < 4) || (bang && nBang < 3))) {
+                    char fn[512]; snprintf(fn, sizeof(fn), "%s/%s%d.bmp", opt.captureFx.c_str(), wave ? "wave" : "bang", wave ? nWave++ : nBang++);
+                    screenshot(fn); lastCap = now;
+                }
+            }
             if (opt.exitAfter > 0 && now >= opt.exitAfter) running = false;
             if (!vsync) SDL_Delay(steps ? 4 : 2);
         }
         if (sc == SC_GAME) {
             if (mode == M_HOST || mode == M_CLIENT) {
-                fprintf(stdout, "RESULT mode=%s phase=%d winner=%d frame=%u score0=%d score1=%d lines0=%d lines1=%d center=%d\n",
+                fprintf(stdout, "RESULT mode=%s phase=%d winner=%d frame=%u score0=%d score1=%d lines0=%d lines1=%d center=%d "
+                        "round=%d sets=%d-%d target=%d start=%d/%d level=%d/%d peer=%s\n",
                         mode == M_HOST ? "host" : "client", view.phase, view.winner, view.frame,
-                        view.pl[0].score, view.pl[1].score, view.pl[0].lines, view.pl[1].lines, view.center);
+                        view.pl[0].score, view.pl[1].score, view.pl[0].lines, view.pl[1].lines, view.center,
+                        view.round, view.setWins[0], view.setWins[1], view.setTarget,
+                        view.pl[0].startLevel, view.pl[1].startLevel, view.pl[0].level, view.pl[1].level, peerName.c_str());
             }
             leaveMatch();
         }
@@ -1469,6 +1748,8 @@ int main(int argc, char** argv) {
         else if (a == "--screenshot") { app.opt.shot = next(); app.opt.shotAt = atof(next().c_str()); }
         else if (a == "--screen") app.opt.screen = next();
         else if (a == "--force") app.opt.force = next();
+        else if (a == "--capture-fx") app.opt.captureFx = next();
+        else if (a == "--cpu-level") app.opt.cpuLevel = atoi(next().c_str());
         else if (a == "--export-music") return exportMusic(next());
         else if (a == "--dark") app.opt.theme = 1;
         else if (a == "--light") app.opt.theme = 0;

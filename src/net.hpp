@@ -9,14 +9,14 @@ namespace net {
 
 constexpr uint16_t DISC_PORT = 47790;   // hosts broadcast beacons here
 constexpr uint16_t GAME_PORT = 47791;   // host listens here (or the next free port)
-constexpr uint8_t  VERSION   = 3;
+constexpr uint8_t  VERSION   = 4;
 
 enum PktType : uint8_t { P_BEACON = 1, P_JOIN, P_WELCOME, P_INPUT, P_STATE, P_BYE, P_FULL };
 
 #pragma pack(push, 1)
 struct Hdr { char magic[4]; uint8_t ver; uint8_t type; };
 struct Beacon  { Hdr h; char name[24]; uint16_t port; uint8_t busy; uint32_t hostId; };
-struct Join    { Hdr h; char name[24]; uint32_t nonce; };
+struct Join    { Hdr h; char name[24]; uint32_t nonce; uint8_t speed; };
 struct Welcome { Hdr h; char name[24]; uint32_t nonce; };
 struct InputPkt {
     Hdr h; uint32_t nonce; uint32_t seq;

@@ -108,10 +108,24 @@ Two free packs that suit the game:
   - **Easy** is slow and wobbly, never slams pieces down, and grabs any single-row clear it sees.
   - **Normal** plays steadily and saves up for doubles and triples to push you.
   - **Hard** is quick and sharp, sets up big pushes, but still moves at a person's speed.
+  - When the CPU has lined up a double or better, a **!** bubble pops up over its slime
+    (**!!** for a triple, **!!!** for a quad). That's your cue to brace.
 - **2 PLAYERS (2 PADS)**: two controllers on one Deck. Player 2's slimes rise from the bottom,
   so for them Up is soft drop and Down is hard drop.
 
-Settings (theme, music, sound effects, CPU level) are saved in `~/.config/slimepush/settings.txt` on Linux and
+## Settings
+
+| Setting | What it does |
+|---|---|
+| Theme | Light or dark |
+| Music / Sound FX | Switch each on or off |
+| Rumble | Shakes your controller when you clear, push or get pushed |
+| CPU | Easy / Normal / Hard |
+| Starting speed | Your gravity at the start of each round (1-9). Each player picks their own, so a strong player can give a casual one a head start. Over LAN each side uses its own setting. |
+| Match | Single game, best of 3 or best of 5. In a LAN battle the host's choice is used. Rounds roll on automatically after a few seconds, or as soon as both press A. |
+| Name | Opens an on-screen keyboard (12 characters). This is what shows up when the other player looks for games. Leave it empty to go back to the automatic name. |
+
+Settings are saved in `~/.config/slimepush/settings.txt` on Linux and
 `%APPDATA%\SlimePush\settings.txt` on Windows.
 
 ## Building from source
@@ -128,7 +142,7 @@ pushing a `v*` tag attaches them to a release. To build them yourself on Linux:
 The scripts download SDL 2.30.9 themselves. The Linux one compiles with zig (installed through pip)
 so the binary runs on older glibc; see the workflow for the apt packages it needs.
 
-Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, `--light`.
+Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, `--light`, `--selftest <games>`.
 
 ## Code layout
 

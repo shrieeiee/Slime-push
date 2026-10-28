@@ -42,6 +42,8 @@ struct PlayerView {
     uint8_t lastPush;
     uint8_t ready;                     // wants a rematch
     uint8_t pieceId;                   // id used to draw the active piece
+    uint8_t level;                     // this player's own speed level (gravity + score multiplier)
+    uint8_t startLevel;                // handicap: the level they started the round on
 };
 
 struct State {
@@ -49,9 +51,13 @@ struct State {
     uint8_t  phase;
     uint16_t phaseTimer;
     int8_t   winner;      // -1 none, 0/1 player, 2 draw
-    uint8_t  level;
+    uint8_t  level;       // highest of the two players' levels (drives the music tempo)
     int8_t   center;      // global row of the push line (boundary above this row)
     uint8_t  reason;      // 0 normal, 1 opponent left, 2 forfeit
+    uint8_t  setWins[2];  // rounds won in the current set
+    uint8_t  setTarget;   // rounds needed to win the set (1 = single game, 2 = best of 3, 3 = best of 5)
+    uint8_t  round;       // 1-based round number in the set
+    uint8_t  setOver;     // the last round decided the set
     Cell     grid[H][W];  // global rows: row 0 = player 0's end, row H-1 = player 1's end
     PlayerView pl[2];
 };
@@ -66,7 +72,10 @@ inline int toGlobal(int p, int localRow) { return p == 0 ? localRow : H - 1 - lo
 class Game {
 public:
     State s{};
-    void reset(uint32_t seed);
+    // brand new set; start0/start1 are each player's starting speed (1-9)
+    void reset(uint32_t seed, int start0 = 1, int start1 = 1, int setTarget = 1);
+    // next round of the same set: keeps the tally and the starting speeds
+    void nextRound(uint32_t seed);
     void step(const Input in[2]);
     void forfeit(int p);
     void disconnect(int p);   // p left the game
@@ -107,6 +116,8 @@ class Bot {
 public:
     int level = 1;              // 0 easy, 1 normal, 2 hard, 3 instant (tests / demo only)
     Input think(const Game& g, int p);
+    // rows the CPU's planned spot will clear for the current piece (0 if nothing planned)
+    int intent() const { return planLines; }
 private:
     enum Stage { THINK, MOVE, SETTLE, DROP_SOFT, DROP_WAIT };
     uint8_t lastSpawn = 255;
@@ -114,6 +125,7 @@ private:
     int tRot = 0, timer = 0, stuck = 0, lastX = -99, lastRot = -1;
     int waypoints[3] = {0, 0, 0}, nWay = 0, way = 0;
     bool softHeld = false;
+    int planLines = 0;
     std::mt19937 rng{1234};
     void plan(const Game& g, int p);
     int range(int lo, int hi) { return lo + (int)(rng() % (unsigned)(hi - lo + 1)); }
