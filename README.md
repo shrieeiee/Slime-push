@@ -103,7 +103,11 @@ Two free packs that suit the game:
 
 ## Other modes
 
-- **VS CPU**: Easy / Normal / Hard (change in Settings).
+- **VS CPU**: Easy / Normal / Hard (change in Settings). The CPU plays at human speed: it pauses to
+  think, taps pieces across, and sometimes fumbles.
+  - **Easy** is slow and wobbly, never slams pieces down, and grabs any single-row clear it sees.
+  - **Normal** plays steadily and saves up for doubles and triples to push you.
+  - **Hard** is quick and sharp, sets up big pushes, but still moves at a person's speed.
 - **2 PLAYERS (2 PADS)**: two controllers on one Deck. Player 2's slimes rise from the bottom,
   so for them Up is soft drop and Down is hard drop.
 

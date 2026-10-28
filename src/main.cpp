@@ -267,7 +267,7 @@ struct App {
         botFor[0] = opt.autoplay;
         botFor[1] = (m == M_CPU);
         bot[0] = Bot(); bot[1] = Bot();
-        bot[0].level = 2; bot[1].level = cfg.cpu;
+        bot[0].level = 3; bot[1].level = cfg.cpu;
         viewer = (m == M_CLIENT) ? 1 : 0;
         view = game.s; prev = view;
         haveView = (m != M_CLIENT);
@@ -1395,28 +1395,40 @@ struct App {
 // headless CPU vs CPU games to sanity check the rules
 static int selftest(int games) {
     std::mt19937 rng(42);
-    int wins[3] = {0, 0, 0};
-    long totalFrames = 0;
-    int maxPush = 0, pushes = 0, vanishes = 0;
-    for (int gi = 0; gi < games; ++gi) {
-        Game gm; gm.reset(rng());
-        Bot b[2]; b[0].level = 2; b[1].level = (gi % 3);
-        int lastPush[2] = {0, 0}, lastVan[2] = {0, 0};
-        while (gm.s.phase != PH_OVER && gm.s.frame < 60 * 60 * 15) {
-            Input in[2] = {b[0].think(gm, 0), b[1].think(gm, 1)};
-            gm.step(in);
-            for (int p = 0; p < 2; ++p) {
-                if (gm.s.pl[p].evPush != lastPush[p]) { lastPush[p] = gm.s.pl[p].evPush; pushes++; maxPush = std::max(maxPush, (int)gm.s.pl[p].lastPush); }
-                if (gm.s.pl[p].evVanish != lastVan[p]) { lastVan[p] = gm.s.pl[p].evVanish; vanishes++; }
+    static const char* names[4] = {"easy", "normal", "hard", "instant"};
+    struct Pair { int a, b; };
+    const Pair pairs[] = {{3, 0}, {3, 1}, {3, 2}, {2, 1}, {1, 0}};
+    for (const Pair& pr : pairs) {
+        int wins[3] = {0, 0, 0}, pushRows[2] = {0, 0}, clears[2][5] = {}, pushedOff = 0, toppedOut = 0;
+        double secs = 0, pps[2] = {0, 0};
+        for (int gi = 0; gi < games; ++gi) {
+            Game gm; gm.reset(rng());
+            Bot b[2]; b[0].level = pr.a; b[1].level = pr.b;
+            int locks[2] = {0, 0}; uint8_t last[2] = {0, 0}, lastP[2] = {0, 0}, lastC[2] = {0, 0};
+            while (gm.s.phase != PH_OVER && gm.s.frame < 60 * 60 * 10) {
+                Input in[2] = {b[0].think(gm, 0), b[1].think(gm, 1)};
+                gm.step(in);
+                for (int p = 0; p < 2; ++p) {
+                    if (gm.s.pl[p].evLock != last[p]) { last[p] = gm.s.pl[p].evLock; locks[p]++; }
+                    if (gm.s.pl[p].evPush != lastP[p]) { lastP[p] = gm.s.pl[p].evPush; pushRows[p] += gm.s.pl[p].lastPush; }
+                    if (gm.s.pl[p].evClear != lastC[p]) { lastC[p] = gm.s.pl[p].evClear; clears[p][std::min(4, (int)gm.s.pl[p].lastClearN)]++; }
+                }
             }
+            if (gm.s.phase == PH_OVER && gm.s.winner < 2) {
+                int loser = 1 - gm.s.winner;   // pushed off if the line went past their side of centre
+                int lead = (gm.s.center - H / 2) * (loser == 0 ? -1 : 1);
+                (lead > 0 ? pushedOff : toppedOut)++;
+            }
+            if (gm.s.phase == PH_OVER) wins[gm.s.winner]++;
+            double t = gm.s.frame / 60.0;
+            secs += t; pps[0] += locks[0] / t; pps[1] += locks[1] / t;
         }
-        if (gm.s.phase == PH_OVER) wins[gm.s.winner]++;
-        totalFrames += gm.s.frame;
-        printf("game %d: winner=%d frames=%u lines=%d/%d score=%d/%d center=%d\n", gi, gm.s.winner, gm.s.frame,
-               gm.s.pl[0].lines, gm.s.pl[1].lines, gm.s.pl[0].score, gm.s.pl[1].score, gm.s.center);
+        printf("%-7s vs %-7s  wins %2d-%2d  draws %d  avg game %.0fs  pieces/sec %.2f vs %.2f\n",
+               names[pr.a], names[pr.b], wins[0], wins[1], wins[2], secs / games, pps[0] / games, pps[1] / games);
+        printf("    clears 1/2/3/4: %d/%d/%d/%d vs %d/%d/%d/%d  push rows %d vs %d  losses: %d behind the line, %d ahead\n",
+               clears[0][1], clears[0][2], clears[0][3], clears[0][4], clears[1][1], clears[1][2], clears[1][3], clears[1][4],
+               pushRows[0], pushRows[1], pushedOff, toppedOut);
     }
-    printf("SUMMARY hard-wins=%d other-wins=%d draws=%d avg_seconds=%.1f pushes=%d maxpush=%d vanishes=%d\n",
-           wins[0], wins[1], wins[2], totalFrames / 60.0 / games, pushes, maxPush, vanishes);
     return 0;
 }
 

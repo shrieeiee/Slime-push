@@ -412,7 +412,7 @@ void Game::step(const Input in[2]) {
 }
 
 // ---------------------------------------------------------------- bot
-static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0, bool* ok) {
+static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0, bool* ok, bool strategic) {
     *ok = false;
     if (g.collides(p, type, rot, x, y0)) return -1000000;
     int y = y0;
@@ -470,53 +470,141 @@ static int evalPlacement(const Game& g, int p, int type, int rot, int x, int y0,
         if (cx + 1 < W && top[cx + 1] < H) bump += std::abs(top[cx] - top[cx + 1]);
     }
     static const int lineBonus[5] = {0, 120, 600, 1100, 2000};
-    int score = lineBonus[std::min(lines, 4)]
+    // Push strategy: singles don't push, so save them up while it's safe and reward
+    // rows that are one cell short with that cell reachable (a ready-made multi-clear)
+    static const int pushBonus[5] = {0, -260, 1500, 2800, 4600};
+    bool safe = danger >= 12;
+    int lb = (strategic && (safe || lines >= 2)) ? pushBonus[std::min(lines, 4)] : lineBonus[std::min(lines, 4)];
+    int ready = 0;
+    if (strategic && safe) {
+        int wellCol = -1;
+        for (int ly = H - 1; ly >= 0; --ly) {
+            int filled = 0, gap = -1;
+            for (int cx = 0; cx < W; ++cx) { if (b[ly][cx]) ++filled; else gap = cx; }
+            if (filled != W - 1) continue;
+            bool open = true;
+            for (int k = 0; k < ly && open; ++k) if (b[k][gap]) open = false;
+            if (!open) continue;
+            if (wellCol < 0) wellCol = gap;
+            if (gap == wellCol) ++ready;
+        }
+        ready = std::min(ready, 4);
+    }
+    int score = lb + ready * 170
               - 40 * agg / W - 420 * holes - 35 * bump - 30 * (H - minLy) - 160 * empties;
     if (danger < 8) score -= (8 - danger) * 400;
     *ok = true;
     return score;
 }
 
+// how each difficulty plays (times in frames at 60 fps)
+struct Persona {
+    int thinkMin, thinkMax;   // pause after a new piece appears
+    int tapMin, tapMax;       // gap between button taps
+    int settleMin, settleMax; // pause once lined up, before dropping
+    int hardPct;              // chance to slam it down rather than soft drop / let it fall
+    int softPct;              // if not slamming: chance to hold soft drop (else let gravity do it)
+    int noise;                // random jitter added to each placement's score (bigger = sloppier)
+    int fumblePct;            // overshoot by a column and come back
+    int keepFumblePct;        // ...and sometimes just leave it there
+    bool strategic;           // saves up for pushing multi-clears instead of taking every single
+};
+static const Persona PERSONAS[4] = {
+    // easy: slow and wobbly, never slams
+    {34, 64, 12, 18, 10, 22,  0, 60, 1100, 18, 45, false},
+    // normal: steady club player
+    {16, 30,  6, 10,  5, 12, 75, 85, 160,  9,  0, true},
+    // hard: quick and sharp, but still a human-ish hand speed
+    { 6, 12,  4,  6,  2,  5, 100, 100,  60,  3,  0, true},
+    // instant: the old machine-gun CPU (used by self-tests / autoplay)
+    { 2,  2,  2,  2,  0,  0, 100, 0,    0,  0,  0, false},
+};
+
 void Bot::plan(const Game& g, int p) {
+    const Persona& P = PERSONAS[std::max(0, std::min(3, level))];
     const PlayerView& v = g.s.pl[p];
-    struct Cand { int score, rot, x; };
-    std::vector<Cand> cs;
+    int bestScore = -2000000000, bestRot = v.rot, bestX = v.x;
+    std::normal_distribution<float> jitter(0.0f, (float)std::max(1, P.noise));
     for (int r = 0; r < 4; ++r)
         for (int x = -3; x < W; ++x) {
             bool ok;
-            int sc = evalPlacement(g, p, v.type, r, x, std::max<int>(v.y, 0), &ok);
-            if (ok) cs.push_back({sc, r, x});
+            int sc = evalPlacement(g, p, v.type, r, x, std::max<int>(v.y, 0), &ok, P.strategic);
+            if (!ok) continue;
+            if (P.noise) sc += (int)jitter(rng);
+            if (sc > bestScore) { bestScore = sc; bestRot = r; bestX = x; }
         }
-    if (cs.empty()) { tRot = v.rot; tX = v.x; planned = true; return; }
-    std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
-    int pick = 0;
-    if (level == 0 && cs.size() > 3 && (rng() % 100) < 45) pick = 1 + (int)(rng() % 3);
-    else if (level == 1 && cs.size() > 2 && (rng() % 100) < 12) pick = 1;
-    tRot = cs[pick].rot; tX = cs[pick].x;
-    planned = true; stuck = 0;
+    tRot = bestRot;
+    // route: optionally overshoot by one column first, like a slightly-too-long press
+    nWay = 0; way = 0;
+    int dir = bestX > v.x ? 1 : bestX < v.x ? -1 : 0;
+    if (dir != 0 && chance(P.fumblePct)) {
+        waypoints[nWay++] = bestX + dir;
+        if (!chance(P.keepFumblePct)) waypoints[nWay++] = bestX;
+    } else {
+        waypoints[nWay++] = bestX;
+    }
+    stuck = 0;
 }
 
 Input Bot::think(const Game& g, int p) {
+    const Persona& P = PERSONAS[std::max(0, std::min(3, level))];
     Input in;
     const PlayerView& v = g.s.pl[p];
-    if (g.s.phase == PH_OVER) { in.pressed = A_READY; in.held = A_READY; return in; }
-    if (g.s.phase != PH_PLAY || !v.active) return in;
-    if (v.evSpawn != lastSpawn) { lastSpawn = v.evSpawn; planned = false; timer = (level == 0 ? 20 : level == 1 ? 10 : 4); }
-    if (!planned) plan(g, p);
-    static const int delays[3] = {12, 6, 2};
-    if (timer > 0) { --timer; if (level == 0) in.held = 0; return in; }
-    timer = delays[level];
-    if (v.x == lastX && v.rot == lastRot) ++stuck; else stuck = 0;
-    lastX = v.x; lastRot = v.rot;
-    if (stuck > 6) { in.pressed = A_HARD; return in; }
-    if (v.rot != tRot) {
-        int diff = (tRot - v.rot) & 3;
-        in.pressed = (diff == 3) ? A_CCW : A_CW;
-    } else if (v.x < tX) in.pressed = in.held = A_RIGHT;
-    else if (v.x > tX) in.pressed = in.held = A_LEFT;
-    else {
-        if (level == 0) { in.held = A_SOFT; timer = 0; }
-        else in.pressed = A_HARD;
+    if (g.s.phase == PH_OVER) {
+        // wander over to the rematch button after a moment, like a person would
+        if (timer > 0) { --timer; return in; }
+        in.pressed = in.held = A_READY;
+        return in;
+    }
+    if (g.s.phase != PH_PLAY) { timer = range(40, 90); return in; }
+    if (!v.active) { softHeld = false; return in; }
+
+    if (v.evSpawn != lastSpawn) {
+        lastSpawn = v.evSpawn;
+        softHeld = false;
+        plan(g, p);
+        stage = THINK;
+        timer = range(P.thinkMin, P.thinkMax);
+        lastX = v.x; lastRot = v.rot;
+    }
+    if (softHeld) in.held = A_SOFT;
+    if (timer > 0) { --timer; return in; }
+
+    auto blocked = [&]() {
+        bool same = (v.x == lastX && v.rot == lastRot);
+        lastX = v.x; lastRot = v.rot;
+        stuck = same ? stuck + 1 : 0;
+        return stuck >= 3;
+    };
+
+    switch (stage) {
+    case THINK:
+        stage = MOVE;
+        // fall through
+    case MOVE: {
+        if (blocked()) { stage = SETTLE; timer = 0; break; }   // wall or stack in the way: drop where it is
+        if (v.rot != tRot) {
+            int diff = (tRot - v.rot) & 3;
+            in.pressed = (diff == 3) ? A_CCW : A_CW;
+            timer = range(P.tapMin, P.tapMax) + (P.tapMin > 4 ? 3 : 0);   // spins take a touch longer
+            break;
+        }
+        int target = waypoints[way];
+        if (v.x < target) { in.pressed = A_RIGHT; in.held |= A_RIGHT; timer = range(P.tapMin, P.tapMax); break; }
+        if (v.x > target) { in.pressed = A_LEFT; in.held |= A_LEFT; timer = range(P.tapMin, P.tapMax); break; }
+        if (way + 1 < nWay) { ++way; timer = range(P.tapMin, P.tapMax) + 4; break; }   // "oops", go back
+        stage = SETTLE;
+        timer = range(P.settleMin, P.settleMax);
+        break;
+    }
+    case SETTLE:
+        if (chance(P.hardPct)) { in.pressed = A_HARD; stage = DROP_WAIT; }
+        else if (chance(P.softPct)) { softHeld = true; in.held |= A_SOFT; stage = DROP_SOFT; }
+        else stage = DROP_WAIT;     // just let gravity bring it down
+        break;
+    case DROP_SOFT:
+    case DROP_WAIT:
+        break;
     }
     return in;
 }

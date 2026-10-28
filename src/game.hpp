@@ -102,17 +102,22 @@ private:
     uint8_t newId();
 };
 
-// CPU opponent
+// CPU opponent. Plays at human speed: thinks, taps the piece across, then drops it.
 class Bot {
 public:
-    int level = 1;              // 0 easy, 1 normal, 2 hard
+    int level = 1;              // 0 easy, 1 normal, 2 hard, 3 instant (tests / demo only)
     Input think(const Game& g, int p);
 private:
+    enum Stage { THINK, MOVE, SETTLE, DROP_SOFT, DROP_WAIT };
     uint8_t lastSpawn = 255;
-    int tRot = 0, tX = 3, timer = 0, stuck = 0, lastX = -99, lastRot = -1;
-    bool planned = false;
+    Stage stage = THINK;
+    int tRot = 0, timer = 0, stuck = 0, lastX = -99, lastRot = -1;
+    int waypoints[3] = {0, 0, 0}, nWay = 0, way = 0;
+    bool softHeld = false;
     std::mt19937 rng{1234};
     void plan(const Game& g, int p);
+    int range(int lo, int hi) { return lo + (int)(rng() % (unsigned)(hi - lo + 1)); }
+    bool chance(int pct) { return (int)(rng() % 100) < pct; }
 };
 
 } // namespace sp
