@@ -27,17 +27,28 @@ Grab the latest files from the [Releases page](https://github.com/shrieeiee/Slim
 
 ## Controls
 
+The default **Buttons** layout puts everything on face buttons and shoulders:
+
 | Button | Action |
 |---|---|
-| D-pad / left stick | Move |
-| Down | Soft drop |
-| Up | Hard drop |
-| A | Spin right |
-| B or X | Spin left |
-| Y, L1/R1, L2/R2 | Hold |
+| D-pad / left stick | Move left and right |
+| D-pad down / stick down / R2 | Soft drop |
+| **X** or **R1** | Hard drop |
+| **A** | Spin right |
+| **B** | Spin left |
+| **Y**, L1 or L2 | Hold |
 | Start | Pause (local) / forfeit (LAN) |
 
-Keyboard: arrows, X/Z spin, C hold, Space hard drop, Enter, Esc. F11 toggles fullscreen.
+D-pad up does nothing in this layout, and pushing the stick up never drops a piece, so a stick
+that drifts upward while you steer can't slam a piece by accident.
+
+Change any of it in **Settings > Controls**: switch to the **Classic** layout (up hard drops, like
+modern Tetris), or pick an action, press A, then press the button you want. Pressing a button that's
+already on that action removes it, and a button can only do one job at a time.
+On Steam Deck you can also use Steam's controller settings to put the back grips (L4/L5/R4/R5) on
+any of these buttons, for example R4 as X to hard drop without moving your thumb.
+
+Keyboard: arrows to move, Down soft drop, Up or Space hard drop, X/Z spin, C or Shift hold, Enter, Esc. F11 toggles fullscreen.
 
 ## Install on Steam Deck
 
@@ -111,7 +122,7 @@ Two free packs that suit the game:
   - When the CPU has lined up a double or better, a **!** bubble pops up over its slime
     (**!!** for a triple, **!!!** for a quad). That's your cue to brace.
 - **2 PLAYERS (2 PADS)**: two controllers on one Deck. Player 2's slimes rise from the bottom,
-  so for them Up is soft drop and Down is hard drop.
+  so for them up and down on the d-pad and stick are swapped.
 
 ## Settings
 
@@ -142,7 +153,7 @@ pushing a `v*` tag attaches them to a release. To build them yourself on Linux:
 The scripts download SDL 2.30.9 themselves. The Linux one compiles with zig (installed through pip)
 so the binary runs on older glibc; see the workflow for the apt packages it needs.
 
-Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, `--light`, `--selftest <games>`.
+Command line options: `--windowed`, `--host`, `--join <ip>`, `--cpu`, `--dark`, `--light`, `--selftest <games>`, `--test-controls`.
 
 ## Code layout
 

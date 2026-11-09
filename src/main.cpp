@@ -34,6 +34,42 @@ static const float C = 20.0f;                      // cell size
 static const float FX = (SW - W * C) / 2, FY = 20; // field origin
 
 // ------------------------------------------------------------------ config
+// ------------------------------------------------------------------ input
+enum Raw : uint16_t {
+    R_UP = 1, R_DOWN = 2, R_LEFT = 4, R_RIGHT = 8, R_A = 16, R_B = 32, R_X = 64, R_Y = 128,
+    R_LB = 256, R_RB = 512, R_START = 1024, R_BACK = 2048, R_HARD = 4096, R_LT = 8192, R_RT = 16384
+};
+// held/prev: what the game sees (buttons, d-pad, stick left/right/down)
+// nav/navPrev: what menus see (the same plus stick-up, so a drifting stick can never hard drop)
+struct Device {
+    SDL_GameController* gc = nullptr; SDL_JoystickID id = -1;
+    uint16_t held = 0, prev = 0, nav = 0, navPrev = 0;
+};
+
+// gameplay actions a controller button can be bound to
+enum BindAction { B_LEFT, B_RIGHT, B_SOFT, B_HARD, B_CW, B_CCW, B_HOLD, B_COUNT };
+static const char* BIND_NAMES[B_COUNT] = {"MOVE LEFT", "MOVE RIGHT", "SOFT DROP", "HARD DROP", "SPIN RIGHT", "SPIN LEFT", "HOLD"};
+static const uint16_t BIND_ACTIONS[B_COUNT] = {A_LEFT, A_RIGHT, A_SOFT, A_HARD, A_CW, A_CCW, A_HOLD};
+struct Binds { uint16_t m[B_COUNT]; };
+// "Buttons": everything that matters is on a face button or shoulder; d-pad up does nothing
+static const Binds BINDS_BUTTONS = {{R_LEFT, R_RIGHT, (uint16_t)(R_DOWN | R_RT), (uint16_t)(R_X | R_RB),
+                                     R_A, R_B, (uint16_t)(R_Y | R_LB | R_LT)}};
+// "Classic": the modern-Tetris layout, up is hard drop
+static const Binds BINDS_CLASSIC = {{R_LEFT, R_RIGHT, R_DOWN, R_UP, R_A, (uint16_t)(R_B | R_X),
+                                     (uint16_t)(R_Y | R_LB | R_RB | R_LT | R_RT)}};
+// the keyboard keeps its own fixed keys: arrows, Up/Space drop, X/Z spin, C/Shift hold
+static const Binds BINDS_KEYBOARD = {{R_LEFT, R_RIGHT, R_DOWN, (uint16_t)(R_UP | R_HARD), R_A, R_B, R_LB}};
+
+static const char* rawName(uint16_t bit) {
+    switch (bit) {
+        case R_UP: return "UP"; case R_DOWN: return "DOWN"; case R_LEFT: return "LEFT"; case R_RIGHT: return "RIGHT";
+        case R_A: return "A"; case R_B: return "B"; case R_X: return "X"; case R_Y: return "Y";
+        case R_LB: return "L1"; case R_RB: return "R1"; case R_LT: return "L2"; case R_RT: return "R2";
+        default: return "?";
+    }
+}
+static const uint16_t BINDABLE[] = {R_A, R_B, R_X, R_Y, R_LB, R_RB, R_LT, R_RT, R_UP, R_DOWN, R_LEFT, R_RIGHT};
+
 struct Config {
     int theme = 0;       // 0 light, 1 dark
     bool sound = true;
@@ -43,6 +79,7 @@ struct Config {
     int speed = 1;       // starting speed 1-9 (handicap)
     int sets = 1;        // rounds to win: 1 single game, 2 best of 3, 3 best of 5
     std::string name;    // empty = automatic from the computer name
+    Binds binds = BINDS_BUTTONS;
     uint32_t hostId = 0;
     std::string path;
     void load() {
@@ -66,6 +103,8 @@ struct Config {
                 else if (k == "speed") speed = std::max(1, std::min(9, (int)n));
                 else if (k == "sets") sets = std::max(1, std::min(3, (int)n));
                 else if (k == "name") name = cleanName(v);
+                else if (k.rfind("bind", 0) == 0 && k.size() == 5 && k[4] >= '0' && k[4] < '0' + B_COUNT && n > 0)
+                    binds.m[k[4] - '0'] = (uint16_t)(n & 0x7fff & ~(R_START | R_BACK | R_HARD));
                 else if (k == "id") hostId = n;
             }
             fclose(f);
@@ -78,6 +117,7 @@ struct Config {
         fprintf(f, "theme %d\nsound %d\nmusic %d\nrumble %d\ncpu %d\nspeed %d\nsets %d\nid %u\n",
                 theme, sound ? 1 : 0, music ? 1 : 0, rumble ? 1 : 0, cpu, speed, sets, hostId);
         if (!name.empty()) fprintf(f, "name %s\n", name.c_str());
+        for (int i = 0; i < B_COUNT; ++i) fprintf(f, "bind%d %u\n", i, (unsigned)binds.m[i]);
         fclose(f);
     }
     // names: A-Z 0-9 - _ and single spaces, at most 12 characters
@@ -97,24 +137,20 @@ struct Config {
 };
 
 // ------------------------------------------------------------------ input
-enum Raw : uint16_t {
-    R_UP = 1, R_DOWN = 2, R_LEFT = 4, R_RIGHT = 8, R_A = 16, R_B = 32, R_X = 64, R_Y = 128,
-    R_LB = 256, R_RB = 512, R_START = 1024, R_BACK = 2048, R_HARD = 4096
-};
-struct Device { SDL_GameController* gc = nullptr; SDL_JoystickID id = -1; uint16_t held = 0, prev = 0; };
-
-static Input toActions(uint16_t held, uint16_t pressed, bool flipped) {
+static Input toActions(uint16_t held, uint16_t pressed, bool flipped, const Binds& b) {
+    if (flipped) {   // player 2 on a shared screen: their slimes rise, so up and down swap
+        auto swapUD = [](uint16_t r) { uint16_t u = r & R_UP, d = r & R_DOWN; r &= (uint16_t)~(R_UP | R_DOWN); return (uint16_t)(r | (u ? R_DOWN : 0) | (d ? R_UP : 0)); };
+        held = swapUD(held); pressed = swapUD(pressed);
+    }
     auto map = [&](uint16_t r) {
         uint16_t a = 0;
-        if (r & R_LEFT) a |= A_LEFT;
-        if (r & R_RIGHT) a |= A_RIGHT;
-        if (r & (flipped ? R_UP : R_DOWN)) a |= A_SOFT;
-        if (r & ((flipped ? R_DOWN : R_UP) | R_HARD)) a |= A_HARD;
-        uint16_t cw = A_CW, ccw = A_CCW;
-        if (flipped) std::swap(cw, ccw);
-        if (r & R_A) a |= cw;
-        if (r & (R_B | R_X)) a |= ccw;
-        if (r & (R_Y | R_LB | R_RB)) a |= A_HOLD;
+        for (int i = 0; i < B_COUNT; ++i) if (r & b.m[i]) a |= BIND_ACTIONS[i];
+        if (flipped) {
+            bool cw = a & A_CW, ccw = a & A_CCW;
+            a &= (uint16_t)~(A_CW | A_CCW);
+            if (cw) a |= A_CCW;
+            if (ccw) a |= A_CW;
+        }
         return a;
     };
     Input in;
@@ -123,12 +159,55 @@ static Input toActions(uint16_t held, uint16_t pressed, bool flipped) {
     if (pressed & R_A) in.pressed |= A_READY;
     return in;
 }
+// left stick to d-pad bits. Needs a clear push in one direction; up is reported separately
+// (menus only) so a stick drifting upward while you steer can never hard drop.
+static uint16_t stickBits(int lx, int ly, uint16_t* up) {
+    int ax = std::abs(lx), ay = std::abs(ly);
+    uint16_t b = 0;
+    *up = 0;
+    if (ax > 19000 && ax * 10 > ay * 8) b |= lx < 0 ? R_LEFT : R_RIGHT;
+    if (ly > 24000 && ay * 10 > ax * 12) b |= R_DOWN;
+    if (ly < -24000 && ay * 10 > ax * 12) *up = R_UP;
+    return b;
+}
+
+static int testControls() {
+    int fails = 0;
+    auto check = [&](bool ok, const char* what) { printf("%s  %s\n", ok ? "ok  " : "FAIL", what); if (!ok) ++fails; };
+    auto act = [](uint16_t raw, const Binds& b, bool flip = false) { return toActions(raw, raw, flip, b).pressed; };
+    const Binds& d = BINDS_BUTTONS;
+    check(act(R_A, d) & A_CW, "A spins right");
+    check(act(R_B, d) & A_CCW, "B spins left");
+    check(act(R_X, d) & A_HARD, "X hard drops");
+    check(act(R_RB, d) & A_HARD, "R1 hard drops");
+    check(act(R_Y, d) & A_HOLD, "Y holds");
+    check(act(R_LB, d) & A_HOLD, "L1 holds");
+    check(act(R_RT, d) & A_SOFT, "R2 soft drops");
+    check(act(R_DOWN, d) & A_SOFT, "d-pad down soft drops");
+    check(act(R_UP, d) == 0, "d-pad up does nothing by default");
+    check(act(R_UP, BINDS_CLASSIC) & A_HARD, "classic layout: up hard drops");
+    uint16_t up;
+    check(stickBits(-30000, -15000, &up) == R_LEFT && up == 0, "stick left with some upward drift only moves left");
+    check(stickBits(26000, 22000, &up) == R_RIGHT, "stick right with some downward drift only moves right");
+    check(stickBits(5000, 30000, &up) == R_DOWN, "stick pushed down soft drops");
+    check(stickBits(2000, -32000, &up) == 0 && up == R_UP, "stick up never reaches the game (menus only)");
+    check(stickBits(12000, 9000, &up) == 0 && up == 0, "small stick movement is ignored");
+    check(act(R_DOWN, d, true) == 0 && (act(R_UP, d, true) & A_SOFT), "player 2 on a shared screen: up soft drops");
+    check(act(R_A, d, true) & A_CCW, "player 2 on a shared screen: spins mirror");
+    check(act(R_UP, BINDS_KEYBOARD) & A_HARD, "keyboard: up hard drops");
+    check(act(R_HARD, BINDS_KEYBOARD) & A_HARD, "keyboard: space hard drops");
+    check(toActions(R_A, R_A, false, d).pressed & A_READY, "A still confirms a rematch");
+    printf("%s\n", fails ? "SOME CHECKS FAILED" : "all checks passed");
+    return fails ? 1 : 0;
+}
+
+static Input mergeInput(Input a, const Input& b) { a.held |= b.held; a.pressed |= b.pressed; return a; }
 
 // ------------------------------------------------------------------ fx
 struct Particle { float x, y, vx, vy, r, life, max; Col c; };
 struct FloatText { std::string s; float x, y, t; Col c; float scale; };
 
-enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME, SC_NAME };
+enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME, SC_NAME, SC_CONTROLS };
 enum Mode { M_CPU, M_LOCAL, M_HOST, M_CLIENT };
 
 struct Options {
@@ -142,6 +221,7 @@ struct Options {
     std::string force;   // debug: pause / over / forfeit shortly before the screenshot
     std::string captureFx;  // debug: save frames when a push wave or the CPU warning is on screen
     int cpuLevel = -1;
+    bool legend = false;   // debug: show the button legend without a controller
 };
 
 struct App {
@@ -202,6 +282,10 @@ struct App {
     std::vector<Wave> waves;
     float shove[2] = {0, 0}, shoveV[2] = {0, 0};   // mascot knock-back (pixels, toward/away from the jar)
     int peerSpeed = 1;
+    // controls editor
+    int ctlSel = 0;
+    bool ctlWaiting = false;
+    double ctlWaitStart = 0;
     // name editor
     std::string nameDraft;
     int nameCur = 0;
@@ -255,7 +339,7 @@ struct App {
     }
     void readDevices() {
         const Uint8* k = SDL_GetKeyboardState(nullptr);
-        kb.prev = kb.held;
+        kb.prev = kb.held; kb.navPrev = kb.nav;
         uint16_t h = 0;
         if (k[SDL_SCANCODE_UP]) h |= R_UP;
         if (k[SDL_SCANCODE_DOWN]) h |= R_DOWN;
@@ -272,9 +356,9 @@ struct App {
             if (k[SDL_SCANCODE_RETURN]) h |= R_START;
             if (k[SDL_SCANCODE_ESCAPE] || k[SDL_SCANCODE_BACKSPACE]) h |= R_BACK;
         }
-        kb.held = h;
+        kb.held = kb.nav = h;
         for (auto& p : pads) {
-            p.prev = p.held;
+            p.prev = p.held; p.navPrev = p.nav;
             uint16_t b = 0;
             auto B = [&](SDL_GameControllerButton x) { return SDL_GameControllerGetButton(p.gc, x) != 0; };
             if (B(SDL_CONTROLLER_BUTTON_DPAD_UP)) b |= R_UP;
@@ -289,22 +373,28 @@ struct App {
             if (B(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) b |= R_RB;
             if (B(SDL_CONTROLLER_BUTTON_START)) b |= R_START;
             if (B(SDL_CONTROLLER_BUTTON_BACK)) b |= R_BACK;
+            if (SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000) b |= R_LT;
+            if (SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) b |= R_RT;
+            // left stick: it has to be pushed clearly in one direction, so wobble while steering
+            // doesn't soft drop, and pushing up never reaches the game at all (menus only)
             int lx = SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_LEFTX);
             int ly = SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_LEFTY);
-            if (lx < -18000) b |= R_LEFT;
-            if (lx > 18000) b |= R_RIGHT;
-            if (ly < -22000) b |= R_UP;
-            if (ly > 22000) b |= R_DOWN;
-            if (SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000) b |= R_LB;
-            if (SDL_GameControllerGetAxis(p.gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) b |= R_RB;
-            p.held = b;
+            uint16_t stickUp = 0, stick = stickBits(lx, ly, &stickUp);
+            p.held = (uint16_t)(b | stick);
+            p.nav = (uint16_t)(p.held | stickUp);
         }
     }
-    uint16_t allHeld() const { uint16_t h = kb.held; for (auto& p : pads) h |= p.held; return h; }
+    uint16_t allHeld() const { uint16_t h = kb.nav; for (auto& p : pads) h |= p.nav; return h; }
     uint16_t allPressed() const {
-        uint16_t e = (uint16_t)(kb.held & ~kb.prev);
-        for (auto& p : pads) e |= (uint16_t)(p.held & ~p.prev);
+        uint16_t e = (uint16_t)(kb.nav & ~kb.navPrev);
+        for (auto& p : pads) e |= (uint16_t)(p.nav & ~p.navPrev);
         return e;
+    }
+    Input padInput(const Device& d, bool flipped) const {
+        return toActions(d.held, (uint16_t)(d.held & ~d.prev), flipped, cfg.binds);
+    }
+    Input kbInput(bool flipped) const {
+        return toActions(kb.held, (uint16_t)(kb.held & ~kb.prev), flipped, BINDS_KEYBOARD);
     }
     // menu repeat for held directions
     int repT = 0; uint16_t repDir = 0;
@@ -554,14 +644,13 @@ struct App {
         // local inputs
         Input in[2];
         if (mode == M_LOCAL) {
-            Device* d1 = pads.size() >= 1 ? &pads[0] : &kb;
-            Device* d2 = pads.size() >= 2 ? &pads[1] : (pads.size() == 1 ? &kb : nullptr);
-            uint16_t h1 = d1->held, p1 = (uint16_t)(d1->held & ~d1->prev);
-            if (pads.size() >= 2) { h1 |= kb.held; p1 |= (uint16_t)(kb.held & ~kb.prev); }
-            in[0] = toActions(h1, p1, false);
-            if (d2) in[1] = toActions(d2->held, (uint16_t)(d2->held & ~d2->prev), true);
+            // player 1: first pad (plus keyboard when there are two pads); player 2: second pad, else keyboard
+            if (pads.size() >= 2) { in[0] = mergeInput(padInput(pads[0], false), kbInput(false)); in[1] = padInput(pads[1], true); }
+            else if (pads.size() == 1) { in[0] = padInput(pads[0], false); in[1] = kbInput(true); }
+            else in[0] = kbInput(false);
         } else {
-            in[0] = toActions(allHeld(), e, false);
+            in[0] = kbInput(false);
+            for (auto& d : pads) in[0] = mergeInput(in[0], padInput(d, false));
         }
         if (forfeitAsk) in[0] = Input{};
         in[0].pressed |= forfeitPress;
@@ -742,7 +831,7 @@ struct App {
             }
         }
     }
-    static constexpr int SET_N = 9;
+    static constexpr int SET_N = 10;
     void tickSettings() {
         uint16_t e = menuPressed();
         if (e & R_UP) { sel = (sel + SET_N - 1) % SET_N; au.play(S_MOVE); }
@@ -759,12 +848,120 @@ struct App {
             case 6: cfg.sets = (cfg.sets - 1 + 3 + d) % 3 + 1; break;
             case 7:
                 changed = false;
+                if (e & R_A) { ctlSel = 0; ctlWaiting = false; sc = SC_CONTROLS; au.play(S_SELECT); return; }
+                break;
+            case 8:
+                changed = false;
                 if (e & R_A) { nameDraft = myName; nameCur = 0; sc = SC_NAME; au.play(S_SELECT); return; }
                 break;
             default: changed = false; break;
         }
         if (d && changed) { cfg.save(); au.play(S_SELECT); }
         if ((e & (R_B | R_BACK)) || (sel == SET_N - 1 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
+    }
+
+    // ---- controls: presets plus per-action remapping
+    const char* layoutName() const {
+        auto same = [&](const Binds& b) { return memcmp(b.m, cfg.binds.m, sizeof(b.m)) == 0; };
+        if (same(BINDS_BUTTONS)) return "BUTTONS";
+        if (same(BINDS_CLASSIC)) return "CLASSIC";
+        return "CUSTOM";
+    }
+    // rows: 0 layout, 1..7 actions, 8 reset, 9 back
+    static constexpr int CTL_N = B_COUNT + 3;
+    void tickControls() {
+        if (ctlWaiting) {
+            uint16_t pressed = 0, nav = (uint16_t)(kb.nav & ~kb.navPrev);
+            for (auto& d : pads) { pressed |= (uint16_t)(d.held & ~d.prev); nav |= (uint16_t)(d.nav & ~d.navPrev); }
+            if ((nav & (R_START | R_BACK)) || now - ctlWaitStart > 6) { ctlWaiting = false; au.play(S_BACK); return; }
+            uint16_t bit = 0;
+            for (uint16_t b : BINDABLE) if (pressed & b) { bit = b; break; }
+            if (!bit) return;
+            int act = ctlSel - 1;
+            uint16_t& m = cfg.binds.m[act];
+            if (m & bit) {
+                if (m != bit) m &= (uint16_t)~bit;             // pressing a bound button again removes it
+                else say("EVERY ACTION NEEDS AT LEAST ONE BUTTON");
+            } else {
+                for (int i = 0; i < B_COUNT; ++i) {             // a button does one job: take it off anything else
+                    if (i == act || !(cfg.binds.m[i] & bit)) continue;
+                    if (cfg.binds.m[i] == bit) { say(std::string(rawName(bit)) + " IS THE ONLY BUTTON FOR " + BIND_NAMES[i]); ctlWaiting = false; return; }
+                    cfg.binds.m[i] &= (uint16_t)~bit;
+                }
+                m |= bit;
+            }
+            cfg.save();
+            au.play(S_SELECT);
+            ctlWaiting = false;
+            return;
+        }
+        uint16_t e = menuPressed();
+        if (e & R_UP) { ctlSel = (ctlSel + CTL_N - 1) % CTL_N; au.play(S_MOVE); }
+        if (e & R_DOWN) { ctlSel = (ctlSel + 1) % CTL_N; au.play(S_MOVE); }
+        if (ctlSel == 0 && (e & (R_LEFT | R_RIGHT | R_A))) {
+            bool buttons = strcmp(layoutName(), "BUTTONS") == 0;
+            cfg.binds = buttons ? BINDS_CLASSIC : BINDS_BUTTONS;
+            cfg.save(); au.play(S_SELECT);
+        } else if (ctlSel >= 1 && ctlSel <= B_COUNT && (e & R_A)) {
+            if (pads.empty()) say("CONNECT A CONTROLLER TO CHANGE ITS BUTTONS");
+            else { ctlWaiting = true; ctlWaitStart = now; au.play(S_SELECT); }
+        } else if (ctlSel == B_COUNT + 1 && (e & R_A)) {
+            cfg.binds = BINDS_BUTTONS; cfg.save(); au.play(S_SELECT); say("BACK TO THE DEFAULT BUTTONS");
+        } else if ((ctlSel == B_COUNT + 2 && (e & R_A)) || (e & (R_B | R_BACK))) {
+            au.play(S_BACK); sc = SC_SETTINGS; sel = 7;
+        }
+    }
+    // a button-shaped chip; returns its width
+    float chip(float x, float cy, const char* name) {
+        const Theme& T = th();
+        std::string k = name;
+        Col c = k == "A" ? hex(0x46b98a) : k == "B" ? hex(0xff6f9f) : k == "X" ? hex(0x4fbfd8) : k == "Y" ? hex(0xffcf4d) : T.muted;
+        if (k.size() == 1) {
+            g.circle(x + 16, cy, 17, border()); g.circle(x + 16, cy, 13, c);
+            head(x + 16, cy - 7, 14, Col{255, 255, 255, 255}, name, AL_CENTER, F_BODY);
+            return 32;
+        }
+        float w = g.measure(name, 12, F_BODY) + 22;
+        g.rrect(x - 4, cy - 15, w + 8, 30, 15, border());
+        g.rrect(x, cy - 11, w, 22, 11, c);
+        head(x + w / 2, cy - 6, 12, Col{255, 255, 255, 255}, name, AL_CENTER, F_BODY);
+        return w + 8;
+    }
+    void chips(float x, float cy, uint16_t mask, float gap = 10) {
+        for (uint16_t bit : BINDABLE) if (mask & bit) x += chip(x, cy, rawName(bit)) + gap;
+    }
+    void drawControls() {
+        const Theme& T = th();
+        drawBackground();
+        banner("CONTROLS", pieceColor(6));
+        float x0 = SW / 2 - 330, w = 660, rowH = 50, y = 120;
+        for (int r = 0; r < CTL_N; ++r) {
+            bool on = r == ctlSel;
+            float yy = y + r * (rowH + 8) + (r > B_COUNT ? 10 : 0);
+            if (r == 0 || r > B_COUNT) {
+                std::string label = r == 0 ? std::string("LAYOUT:  ") + layoutName() : r == B_COUNT + 1 ? "RESET TO DEFAULT" : "BACK";
+                button(SW / 2, yy, 420, label.c_str(), on, rowH - 6);
+                continue;
+            }
+            int act = r - 1;
+            g.rrect(x0 - 5, yy - 5, w + 10, rowH + 10, 22, border());
+            g.rrect(x0, yy, w, rowH, 18, on ? T.pop : T.panel);
+            if (on) head(x0 + 26, yy + 17, 16, Col{255, 255, 255, 255}, BIND_NAMES[act], AL_LEFT, F_BODY);
+            else body(x0 + 26, yy + 17, 16, T.text, BIND_NAMES[act]);
+            if (on && ctlWaiting) {
+                float pulse = 0.6f + 0.4f * std::sin((float)t * 8);
+                head(x0 + 250, yy + 17, 15, withA(Col{255, 255, 255, 255}, (uint8_t)(255 * pulse)), "PRESS A BUTTON TO ADD OR REMOVE", AL_LEFT, F_BODY);
+            } else {
+                chips(x0 + 250, yy + rowH / 2, cfg.binds.m[act]);
+            }
+        }
+        const char* hint = ctlSel == 0 ? "BUTTONS: SPIN A / B, DROP X / R1, HOLD Y / L1.   CLASSIC: UP DROPS, LIKE MODERN TETRIS"
+                         : ctlSel <= B_COUNT ? (ctlWaiting ? "PRESS START TO CANCEL" : "PRESS A, THEN THE BUTTON YOU WANT. PRESS A BOUND BUTTON AGAIN TO REMOVE IT")
+                         : "";
+        body(SW / 2, 712, 14, T.muted, hint, AL_CENTER);
+        if (ctlWaiting) prompts({{"START", "CANCEL"}});
+        else if (ctlSel == 0) prompts({{"< >", "SWITCH"}, {"B", "BACK"}});
+        else prompts({{"A", "CHANGE"}, {"B", "BACK"}});
     }
 
     // ---- name editor: a console-style letter grid
@@ -778,7 +975,7 @@ struct App {
             initName();
             say(n.empty() ? "NAME SET BACK TO AUTOMATIC" : "NAME SAVED");
         }
-        sc = SC_SETTINGS; sel = 7;
+        sc = SC_SETTINGS; sel = 8;
     }
     void nameType(char c) {
         if (nameDraft.size() >= 12) return;
@@ -858,6 +1055,7 @@ struct App {
             case SC_JOIN: tickJoin(); break;
             case SC_SETTINGS: tickSettings(); break;
             case SC_NAME: tickName(); break;
+            case SC_CONTROLS: tickControls(); break;
             case SC_HELP: if (allPressed() & (R_A | R_B | R_BACK | R_START)) { au.play(S_BACK); sc = SC_TITLE; sel = 4; } break;
             case SC_GAME: tickGame(); if (sc == SC_GAME) effects(); break;
         }
@@ -1306,6 +1504,18 @@ struct App {
             float k = (s.phaseTimer % 60) / 60.0f;
             float size = 90 + 50 * k * k;
             head(mid, FY + H * C / 2 - size / 2, size, T.pop, b);
+            if (!pads.empty() || opt.legend) {     // remind everyone which buttons do what
+                float ly = FY + H * C / 2 + 110, lw = W * C + 26;
+                g.rrect(mid - lw / 2 - 5, ly - 5, lw + 10, 134, 22, border());
+                g.rrect(mid - lw / 2, ly, lw, 124, 18, th().panel);
+                const char* rn[3] = {"SPIN", "DROP", "HOLD"};
+                uint16_t rm[3] = {(uint16_t)(cfg.binds.m[B_CW] | cfg.binds.m[B_CCW]), cfg.binds.m[B_HARD], cfg.binds.m[B_HOLD]};
+                for (int i = 0; i < 3; ++i) {
+                    float ry = ly + 24 + i * 38;
+                    body(mid - lw / 2 + 12, ry - 7, 13, th().text, rn[i]);
+                    chips(mid - lw / 2 + 76, ry + 1, rm[i], 8);
+                }
+            }
             if (s.setTarget > 1) {
                 char rb[24]; snprintf(rb, sizeof(rb), "ROUND %d", s.round);
                 head(mid, FY + H * C / 2 - 130, 26, white, rb);
@@ -1465,20 +1675,22 @@ struct App {
             std::string("CPU:  ") + (cfg.cpu == 0 ? "EASY" : cfg.cpu == 1 ? "NORMAL" : "HARD"),
             std::string("STARTING SPEED:  ") + std::to_string(cfg.speed),
             std::string("MATCH:  ") + setNames[cfg.sets - 1],
+            std::string("CONTROLS:  ") + layoutName(),
             std::string("NAME:  ") + myName,
             "BACK"};
-        for (int i = 0; i < SET_N; ++i) button(SW / 2, 122 + i * 62, 480, items[i].c_str(), i == sel, 46);
+        for (int i = 0; i < SET_N; ++i) button(SW / 2, 120 + i * 57, 480, items[i].c_str(), i == sel, 42);
         static const char* hints[SET_N] = {
             "", "", "", "SHAKES YOUR CONTROLLER ON PUSHES AND CLEARS", "HOW TOUGH THE CPU OPPONENT IS",
             "YOUR GRAVITY AT THE START. EACH PLAYER PICKS THEIR OWN, SO A STRONG PLAYER CAN GIVE A HEAD START",
-            "THE HOST'S CHOICE IS USED IN LAN BATTLES", "PRESS A TO EDIT. THIS IS WHAT THE OTHER PLAYER SEES", ""};
+            "THE HOST'S CHOICE IS USED IN LAN BATTLES", "PRESS A TO CHOOSE WHICH BUTTONS SPIN, DROP AND HOLD",
+            "PRESS A TO EDIT. THIS IS WHAT THE OTHER PLAYER SEES", ""};
         const char* hint = hints[sel];
         if (!*hint && musicReady && sel <= 1) {
             static std::string nowPlaying;
             nowPlaying = std::to_string(titleTracks.size() + battleTracks.size()) + " TRACKS  (ADD YOUR OWN IN THE MUSIC FOLDER)";
             hint = nowPlaying.c_str();
         }
-        body(SW / 2, 700, 14, th().muted, hint, AL_CENTER);
+        body(SW / 2, 712, 14, th().muted, hint, AL_CENTER);
         prompts({{"< >", "CHANGE"}, {"B", "BACK"}});
     }
 
@@ -1502,18 +1714,16 @@ struct App {
         y += 18;
         head(146, y, 20, pieceColor(6), "CONTROLS", AL_LEFT, F_DISPLAY);
         y += 42;
-        const char* ctl[][2] = {
-            {"D-PAD / STICK", "MOVE"}, {"DOWN", "SOFT DROP"}, {"UP", "HARD DROP"}, {"A", "SPIN RIGHT"},
-            {"B / X", "SPIN LEFT"}, {"Y / L1 / R1", "HOLD"}, {"START", "PAUSE / FORFEIT"}};
+        const char* order[] = {"MOVE", "SOFT DROP", "HARD DROP", "SPIN RIGHT", "SPIN LEFT", "HOLD", "PAUSE"};
+        uint16_t masks[] = {0, cfg.binds.m[B_SOFT], cfg.binds.m[B_HARD], cfg.binds.m[B_CW], cfg.binds.m[B_CCW], cfg.binds.m[B_HOLD], 0};
         for (int i = 0; i < 7; ++i) {
             float cx = 146 + (i % 2) * 520, cy = y + (i / 2) * 40;
-            float kw = g.measure(ctl[i][0], 12, F_BODY) + 26;
-            g.rrect(cx - 4, cy - 8, kw + 8, 32, 16, border());
-            g.rrect(cx, cy - 4, kw, 24, 12, T.field);
-            body(cx + 13, cy + 2, 12, T.text, ctl[i][0]);
-            body(cx + kw + 18, cy, 15, T.text, ctl[i][1]);
+            body(cx, cy, 15, T.text, order[i]);
+            if (i == 0) { float xx = cx + 150; xx += chip(xx, cy + 8, "D-PAD") + 10; chip(xx, cy + 8, "STICK"); }
+            else if (i == 6) chip(cx + 150, cy + 8, "START");
+            else chips(cx + 150, cy + 8, masks[i]);
         }
-        body(146, y + 4 * 40 + 6, 13, T.muted, "KEYBOARD: ARROWS, X / Z SPIN, C HOLD, SPACE HARD DROP, ENTER, ESC, F11 FULLSCREEN");
+        body(146, y + 4 * 40 + 6, 13, T.muted, "CHANGE BUTTONS IN SETTINGS > CONTROLS.   KEYBOARD: ARROWS, SPACE DROP, X / Z SPIN, C HOLD");
         prompts({{"B", "BACK"}});
     }
 
@@ -1524,6 +1734,7 @@ struct App {
             case SC_JOIN: drawJoin(); break;
             case SC_SETTINGS: drawSettings(); break;
             case SC_NAME: drawName(); break;
+            case SC_CONTROLS: drawControls(); break;
             case SC_HELP: drawHelp(); break;
             case SC_GAME: drawGame(); break;
         }
@@ -1601,6 +1812,7 @@ struct App {
         else if (opt.find || opt.autojoin) beginJoin();
         else if (opt.screen == "settings") sc = SC_SETTINGS;
         else if (opt.screen == "help") sc = SC_HELP;
+        else if (opt.screen == "controls") { sc = SC_CONTROLS; ctlSel = 4; }
         else if (opt.screen == "name") { nameDraft = "SLIMEY"; nameCur = 12; sc = SC_NAME; }
 
         Uint64 freq = SDL_GetPerformanceFrequency(), last = SDL_GetPerformanceCounter();
@@ -1745,6 +1957,8 @@ int main(int argc, char** argv) {
         else if (a == "--windowed") app.opt.windowed = true;
         else if (a == "--exit-after") app.opt.exitAfter = atof(next().c_str());
         else if (a == "--selftest") return selftest(atoi(next().c_str()));
+        else if (a == "--test-controls") return testControls();
+        else if (a == "--legend") app.opt.legend = true;
         else if (a == "--screenshot") { app.opt.shot = next(); app.opt.shotAt = atof(next().c_str()); }
         else if (a == "--screen") app.opt.screen = next();
         else if (a == "--force") app.opt.force = next();

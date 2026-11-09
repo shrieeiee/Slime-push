@@ -27,7 +27,9 @@ jobs:
       - name: Build
         run: ./tools/build-linux.sh
       - name: Self-test
-        run: ./build-linux/SlimePush --selftest 5
+        run: |
+          ./build-linux/SlimePush --test-controls
+          ./build-linux/SlimePush --selftest 5
       - uses: actions/upload-artifact@v4
         with:
           name: SlimePush-linux-steamdeck
