@@ -12,7 +12,8 @@ option(SLIMEPUSH_STATIC_SDL "Link SDL2 statically for a self-contained binary" O
 find_package(SDL2 REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(SlimePush src/main.cpp src/game.cpp src/net.cpp src/gfx.cpp src/audio.cpp src/music.cpp)
+add_executable(SlimePush src/main.cpp src/game.cpp src/net.cpp src/gfx.cpp src/audio.cpp src/music.cpp
+  src/solo.cpp src/catch.cpp src/puzzles_data.cpp)
 if(MSVC)
   target_compile_options(SlimePush PRIVATE /W3 /wd4068 /wd4244 /wd4267 /wd4996 /utf-8)
   target_compile_definitions(SlimePush PRIVATE _CRT_SECURE_NO_WARNINGS)

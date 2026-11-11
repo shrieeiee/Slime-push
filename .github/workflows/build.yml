@@ -29,6 +29,7 @@ jobs:
       - name: Self-test
         run: |
           ./build-linux/SlimePush --test-controls
+          ./build-linux/SlimePush --test-modes
           ./build-linux/SlimePush --selftest 5
       - uses: actions/upload-artifact@v4
         with:
@@ -61,6 +62,8 @@ jobs:
         run: |
           Copy-Item "deps/SDL2-$env:SDL_VER/lib/x64/SDL2.dll" build-windows/Release/
           $p = Start-Process build-windows/Release/SlimePush.exe -ArgumentList "--selftest","3" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $p = Start-Process build-windows/Release/SlimePush.exe -ArgumentList "--test-modes" -Wait -PassThru -NoNewWindow
           if ($p.ExitCode -ne 0) { exit 1 }
       - name: Package
         shell: pwsh

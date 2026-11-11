@@ -72,9 +72,14 @@ static int kickRow(int from, int to) {
     return tbl[from & 3][to & 3];
 }
 
+const int8_t (*srsKicks(int type, int from, int to))[2] {
+    int row = kickRow(from & 3, to & 3);
+    return type == 1 ? KI[row] : KJ[row];
+}
+
 // ---------------------------------------------------------------- tuning
 static const int DAS = 10, ARR = 2, LOCK_FRAMES = 30, LOCK_RESETS = 15;
-static float framesPerRow(int level) { return std::max(1.0f, 14.0f * std::pow(0.82f, (float)(level - 1))); }
+float framesPerRow(int level) { return std::max(1.0f, 14.0f * std::pow(0.82f, (float)(level - 1))); }
 
 // ---------------------------------------------------------------- game
 uint8_t Game::newId() { if (++idCounter == 0) idCounter = 1; return idCounter; }

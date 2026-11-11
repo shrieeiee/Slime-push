@@ -66,6 +66,9 @@ struct State {
 // piece geometry
 const int8_t (*cells(int type, int rot))[2];   // 4 cells of (x,y), y down, in local coords
 int faceIndex(int type);
+// SRS wall kicks for a rotation from -> to: 5 offsets of (x, y-up)
+const int8_t (*srsKicks(int type, int from, int to))[2];
+float framesPerRow(int level);
 
 inline int toGlobal(int p, int localRow) { return p == 0 ? localRow : H - 1 - localRow; }
 

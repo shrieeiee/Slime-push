@@ -14,6 +14,9 @@
 #include "gfx.hpp"
 #include "audio.hpp"
 #include "music.hpp"
+#include "solo.hpp"
+#include "catch.hpp"
+namespace sp { int soloSelfTest(); int catchSelfTest(); }
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -80,6 +83,8 @@ struct Config {
     int sets = 1;        // rounds to win: 1 single game, 2 best of 3, 3 best of 5
     std::string name;    // empty = automatic from the computer name
     Binds binds = BINDS_BUTTONS;
+    int bestMarathon = 0, bestMission = 0, bestMissionCount = 0, bestCatch = 0;
+    uint64_t puzzles = 0;   // bit per cleared puzzle
     uint32_t hostId = 0;
     std::string path;
     void load() {
@@ -103,6 +108,11 @@ struct Config {
                 else if (k == "speed") speed = std::max(1, std::min(9, (int)n));
                 else if (k == "sets") sets = std::max(1, std::min(3, (int)n));
                 else if (k == "name") name = cleanName(v);
+                else if (k == "best_marathon") bestMarathon = (int)n;
+                else if (k == "best_mission") bestMission = (int)n;
+                else if (k == "best_mission_count") bestMissionCount = (int)n;
+                else if (k == "best_catch") bestCatch = (int)n;
+                else if (k == "puzzles") puzzles = strtoull(v.c_str(), nullptr, 10);
                 else if (k.rfind("bind", 0) == 0 && k.size() == 5 && k[4] >= '0' && k[4] < '0' + B_COUNT && n > 0)
                     binds.m[k[4] - '0'] = (uint16_t)(n & 0x7fff & ~(R_START | R_BACK | R_HARD));
                 else if (k == "id") hostId = n;
@@ -118,6 +128,8 @@ struct Config {
                 theme, sound ? 1 : 0, music ? 1 : 0, rumble ? 1 : 0, cpu, speed, sets, hostId);
         if (!name.empty()) fprintf(f, "name %s\n", name.c_str());
         for (int i = 0; i < B_COUNT; ++i) fprintf(f, "bind%d %u\n", i, (unsigned)binds.m[i]);
+        fprintf(f, "best_marathon %d\nbest_mission %d\nbest_mission_count %d\nbest_catch %d\npuzzles %llu\n",
+                bestMarathon, bestMission, bestMissionCount, bestCatch, (unsigned long long)puzzles);
         fclose(f);
     }
     // names: A-Z 0-9 - _ and single spaces, at most 12 characters
@@ -207,7 +219,8 @@ static Input mergeInput(Input a, const Input& b) { a.held |= b.held; a.pressed |
 struct Particle { float x, y, vx, vy, r, life, max; Col c; };
 struct FloatText { std::string s; float x, y, t; Col c; float scale; };
 
-enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME, SC_NAME, SC_CONTROLS };
+enum Screen { SC_TITLE, SC_HOST, SC_JOIN, SC_SETTINGS, SC_HELP, SC_GAME, SC_NAME, SC_CONTROLS,
+              SC_SOLO_MENU, SC_PUZZLES, SC_SOLO, SC_CATCH };
 enum Mode { M_CPU, M_LOCAL, M_HOST, M_CLIENT };
 
 struct Options {
@@ -222,6 +235,7 @@ struct Options {
     std::string captureFx;  // debug: save frames when a push wave or the CPU warning is on screen
     int cpuLevel = -1;
     bool legend = false;   // debug: show the button legend without a controller
+    int screenArg = 0;
 };
 
 struct App {
@@ -445,6 +459,12 @@ struct App {
             want = over ? nullptr : battleTrack;
             if (haveView && view.phase == PH_PLAY && !paused)
                 au.setMusicRate(std::min(1.25f, 1.0f + 0.022f * (view.level - 1)));
+        } else if (sc == SC_SOLO || sc == SC_CATCH) {
+            if (!battleTrack) pickBattleTrack();
+            bool over = sc == SC_SOLO ? solo.over : ctch.over;
+            want = over ? nullptr : battleTrack;
+            int lvl = sc == SC_SOLO ? solo.level : ctch.level;
+            if (!soloPaused) au.setMusicRate(std::min(1.25f, 1.0f + 0.013f * (lvl - 1)));
         } else {
             want = titleTracks.empty() ? nullptr : titleTracks[0];
         }
@@ -811,7 +831,7 @@ struct App {
 
     // ------------------------------------------------------------ menus
     void tickTitle() {
-        static const int N = 7;
+        static const int N = 8;
         uint16_t e = menuPressed();
         if (e & R_UP) { sel = (sel + N - 1) % N; au.play(S_MOVE); }
         if (e & R_DOWN) { sel = (sel + 1) % N; au.play(S_MOVE); }
@@ -820,14 +840,15 @@ struct App {
             switch (sel) {
                 case 0: beginHost(); break;
                 case 1: beginJoin(); break;
-                case 2: startMatch(M_CPU); break;
-                case 3:
+                case 2: sc = SC_SOLO_MENU; soloSel = 0; break;
+                case 3: startMatch(M_CPU); break;
+                case 4:
                     if (pads.size() < 1) say("PLUG IN A SECOND CONTROLLER FOR 2 PLAYERS");
                     else startMatch(M_LOCAL);
                     break;
-                case 4: sc = SC_HELP; break;
-                case 5: sc = SC_SETTINGS; sel = 0; break;
-                case 6: running = false; break;
+                case 5: sc = SC_HELP; break;
+                case 6: sc = SC_SETTINGS; sel = 0; break;
+                case 7: running = false; break;
             }
         }
     }
@@ -857,7 +878,7 @@ struct App {
             default: changed = false; break;
         }
         if (d && changed) { cfg.save(); au.play(S_SELECT); }
-        if ((e & (R_B | R_BACK)) || (sel == SET_N - 1 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 5; }
+        if ((e & (R_B | R_BACK)) || (sel == SET_N - 1 && (e & (R_A | R_START)))) { au.play(S_BACK); sc = SC_TITLE; sel = 6; }
     }
 
     // ---- controls: presets plus per-action remapping
@@ -1056,7 +1077,11 @@ struct App {
             case SC_SETTINGS: tickSettings(); break;
             case SC_NAME: tickName(); break;
             case SC_CONTROLS: tickControls(); break;
-            case SC_HELP: if (allPressed() & (R_A | R_B | R_BACK | R_START)) { au.play(S_BACK); sc = SC_TITLE; sel = 4; } break;
+            case SC_SOLO_MENU: tickSoloMenu(); break;
+            case SC_PUZZLES: tickPuzzles(); break;
+            case SC_SOLO: tickSolo(); break;
+            case SC_CATCH: tickCatch(); break;
+            case SC_HELP: if (allPressed() & (R_A | R_B | R_BACK | R_START)) { au.play(S_BACK); sc = SC_TITLE; sel = 5; } break;
             case SC_GAME: tickGame(); if (sc == SC_GAME) effects(); break;
         }
         tickFx(1.0f / 60);
@@ -1064,7 +1089,7 @@ struct App {
     }
 
     // ------------------------------------------------------------ drawing
-    struct BlobMap { uint8_t t[H][W]; uint8_t id[H][W]; uint8_t f[H][W]; int w, h; };
+    struct BlobMap { uint8_t t[40][16]; uint8_t id[40][16]; uint8_t f[40][16]; int w, h; };
 
     float blinkFor(int id, int salt) const {
         float ph = std::fmod((float)t + (id * 0.618f + salt) * 2.7f, 4.4f);
@@ -1600,8 +1625,8 @@ struct App {
         g.ellipse(310, 660, 120 * (1 - hop * 0.3f), 16, withA(ink(), 50));
         g.slime(310, 650 - hop * 60, 260, pieceColor(5), ink(), (1 - hop) * 0.5f - 0.15f, blinkFor(1, 0), 0, (float)t);
         g.slime(455, 668, 110, pieceColor(6), ink(), std::sin((float)t * 5) * 0.15f, blinkFor(2, 0), 0, (float)t);
-        static const char* items[7] = {"LAN BATTLE: HOST", "LAN BATTLE: JOIN", "VS CPU", "2 PLAYERS (2 PADS)", "HOW TO PLAY", "SETTINGS", "QUIT"};
-        for (int i = 0; i < 7; ++i) button(880, 200 + i * 74, 400, items[i], i == sel);
+        static const char* items[8] = {"LAN BATTLE: HOST", "LAN BATTLE: JOIN", "SOLO MODES", "VS CPU", "2 PLAYERS (2 PADS)", "HOW TO PLAY", "SETTINGS", "QUIT"};
+        for (int i = 0; i < 8; ++i) button(880, 186 + i * 66, 400, items[i], i == sel, 50);
         // player tag, bottom left
         g.rrect(20, SH - 62, g.measure(myName.c_str(), 14, F_BODY) + 40, 40, 20, border());
         g.rrect(24, SH - 58, g.measure(myName.c_str(), 14, F_BODY) + 32, 32, 16, T.panel);
@@ -1727,6 +1752,8 @@ struct App {
         prompts({{"B", "BACK"}});
     }
 
+#include "solo_ui.inc"
+
     void render() {
         switch (sc) {
             case SC_TITLE: drawTitle(); break;
@@ -1735,6 +1762,10 @@ struct App {
             case SC_SETTINGS: drawSettings(); break;
             case SC_NAME: drawName(); break;
             case SC_CONTROLS: drawControls(); break;
+            case SC_SOLO_MENU: drawSoloMenu(); break;
+            case SC_PUZZLES: drawPuzzles(); break;
+            case SC_SOLO: drawSolo(); break;
+            case SC_CATCH: drawCatch(); break;
             case SC_HELP: drawHelp(); break;
             case SC_GAME: drawGame(); break;
         }
@@ -1813,6 +1844,12 @@ struct App {
         else if (opt.screen == "settings") sc = SC_SETTINGS;
         else if (opt.screen == "help") sc = SC_HELP;
         else if (opt.screen == "controls") { sc = SC_CONTROLS; ctlSel = 4; }
+        else if (opt.screen == "solo") { sc = SC_SOLO_MENU; soloSel = opt.screenArg; }
+        else if (opt.screen == "puzzles") { sc = SC_PUZZLES; puzzleSel = opt.screenArg; }
+        else if (opt.screen == "marathon") startSolo(sp::SM_MARATHON);
+        else if (opt.screen == "mission") startSolo(sp::SM_MISSION);
+        else if (opt.screen == "puzzle") startSolo(sp::SM_PUZZLE, opt.screenArg);
+        else if (opt.screen == "catch") startCatch();
         else if (opt.screen == "name") { nameDraft = "SLIMEY"; nameCur = 12; sc = SC_NAME; }
 
         Uint64 freq = SDL_GetPerformanceFrequency(), last = SDL_GetPerformanceCounter();
@@ -1958,9 +1995,19 @@ int main(int argc, char** argv) {
         else if (a == "--exit-after") app.opt.exitAfter = atof(next().c_str());
         else if (a == "--selftest") return selftest(atoi(next().c_str()));
         else if (a == "--test-controls") return testControls();
+        else if (a == "--test-modes") { int f = soloSelfTest() + catchSelfTest(); printf("%s\n", f ? "SOME CHECKS FAILED" : "all checks passed"); return f ? 1 : 0; }
+        else if (a == "--gen-puzzles") {
+            std::string path = next();
+            FILE* f = fopen(path.c_str(), "w");
+            if (!f) return 1;
+            generatePuzzles(f, 20261111u);
+            fclose(f);
+            return 0;
+        }
         else if (a == "--legend") app.opt.legend = true;
         else if (a == "--screenshot") { app.opt.shot = next(); app.opt.shotAt = atof(next().c_str()); }
         else if (a == "--screen") app.opt.screen = next();
+        else if (a == "--screen-arg") app.opt.screenArg = atoi(next().c_str());
         else if (a == "--force") app.opt.force = next();
         else if (a == "--capture-fx") app.opt.captureFx = next();
         else if (a == "--cpu-level") app.opt.cpuLevel = atoi(next().c_str());
