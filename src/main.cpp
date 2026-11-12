@@ -2,6 +2,7 @@
 // Two Decks on the same LAN find each other automatically.
 #include <SDL.h>
 #include <cstdio>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -37,6 +38,31 @@ static const float C = 20.0f;                      // cell size
 static const float FX = (SW - W * C) / 2, FY = 20; // field origin
 
 // ------------------------------------------------------------------ config
+// ------------------------------------------------------------------ startup log
+// Written to the settings folder (log.txt; the previous run is kept as log-previous.txt) so a
+// launch that never shows a picture can still be diagnosed.
+#define SLIMEPUSH_VERSION "1.5.1"
+static FILE* gLog = nullptr;
+static Uint64 gLogStart = 0;
+static void logLine(const char* fmt, ...) {
+    if (!gLog) return;
+    double t = gLogStart ? (double)(SDL_GetPerformanceCounter() - gLogStart) / (double)SDL_GetPerformanceFrequency() : 0.0;
+    fprintf(gLog, "[%7.3f] ", t);
+    va_list ap; va_start(ap, fmt); vfprintf(gLog, fmt, ap); va_end(ap);
+    fputc('\n', gLog);
+    fflush(gLog);
+}
+static void sdlLogToFile(void*, int category, SDL_LogPriority prio, const char* msg) {
+    logLine("SDL log (category %d, priority %d): %s", category, (int)prio, msg);
+}
+static void openLog(const std::string& dir) {
+    std::string path = dir + "/log.txt", prev = dir + "/log-previous.txt";
+    remove(prev.c_str());
+    rename(path.c_str(), prev.c_str());
+    gLog = fopen(path.c_str(), "w");
+    gLogStart = SDL_GetPerformanceCounter();
+}
+
 // ------------------------------------------------------------------ input
 enum Raw : uint16_t {
     R_UP = 1, R_DOWN = 2, R_LEFT = 4, R_RIGHT = 8, R_A = 16, R_B = 32, R_X = 64, R_Y = 128,
@@ -346,6 +372,7 @@ struct App {
         for (auto& p : pads) if (p.id == id) { SDL_GameControllerClose(gc); return; }
         Device d; d.gc = gc; d.id = id;
         pads.push_back(d);
+        logLine("controller connected: %s", SDL_GameControllerName(gc) ? SDL_GameControllerName(gc) : "(no name)");
     }
     void closePad(SDL_JoystickID id) {
         for (size_t i = 0; i < pads.size(); ++i)
@@ -1794,6 +1821,17 @@ struct App {
     int run() {
         net::init();
         cfg.load();
+        openLog(net::configDir());
+        logLine("Slime Push %s starting", SLIMEPUSH_VERSION);
+        {
+            const char* envs[] = {"DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "SDL_VIDEODRIVER",
+                                  "SteamDeck", "SteamOS", "SteamAppId", "SteamGameId", "GAMESCOPE_WAYLAND_DISPLAY",
+                                  "LD_PRELOAD", "SDL_GAMECONTROLLERCONFIG", "ENABLE_GAMESCOPE_WSI"};
+            for (const char* e : envs) { const char* v = getenv(e); logLine("env %s=%s", e, v ? v : "(not set)"); }
+            SDL_version cv, lv; SDL_VERSION(&cv); SDL_GetVersion(&lv);
+            logLine("SDL compiled %d.%d.%d, running %d.%d.%d", cv.major, cv.minor, cv.patch, lv.major, lv.minor, lv.patch);
+            SDL_LogSetOutputFunction(sdlLogToFile, nullptr);
+        }
         if (opt.theme >= 0) cfg.theme = opt.theme;
         initName();
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -1801,19 +1839,33 @@ struct App {
         SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0) {
             fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-            if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) return 1;
+            logLine("SDL_Init with audio failed: %s", SDL_GetError());
+            if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { logLine("SDL_Init failed: %s", SDL_GetError()); return 1; }
+        }
+        logLine("video driver: %s, audio driver: %s", SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(none)",
+                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "(none)");
+        {
+            SDL_DisplayMode dm;
+            if (SDL_GetDesktopDisplayMode(0, &dm) == 0) logLine("display 0: %dx%d @ %d Hz", dm.w, dm.h, dm.refresh_rate);
+            else logLine("no display mode: %s", SDL_GetError());
         }
         Uint32 wf = SDL_WINDOW_ALLOW_HIGHDPI | (opt.windowed ? SDL_WINDOW_RESIZABLE : SDL_WINDOW_FULLSCREEN_DESKTOP);
         win = SDL_CreateWindow("Slime Push", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SW, SH, wf);
-        if (!win) { fprintf(stderr, "window: %s\n", SDL_GetError()); return 1; }
+        if (!win) { fprintf(stderr, "window: %s\n", SDL_GetError()); logLine("window creation failed: %s", SDL_GetError()); return 1; }
+        { int ww, wh; SDL_GetWindowSize(win, &ww, &wh); logLine("window created %dx%d, flags 0x%x", ww, wh, SDL_GetWindowFlags(win)); }
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
         if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
-        if (!ren) { fprintf(stderr, "renderer: %s\n", SDL_GetError()); return 1; }
+        if (!ren) { fprintf(stderr, "renderer: %s\n", SDL_GetError()); logLine("renderer creation failed: %s", SDL_GetError()); return 1; }
+        {
+            SDL_RendererInfo info; int ow = 0, oh = 0;
+            SDL_GetRendererInfo(ren, &info); SDL_GetRendererOutputSize(ren, &ow, &oh);
+            logLine("renderer %s, flags 0x%x, output %dx%d", info.name, info.flags, ow, oh);
+        }
         SDL_RenderSetLogicalSize(ren, SW, SH);
         { SDL_RendererInfo info; if (SDL_GetRendererInfo(ren, &info) == 0) vsync = (info.flags & SDL_RENDERER_PRESENTVSYNC) != 0; }
         SDL_ShowCursor(SDL_DISABLE);
         g.init(ren);
-        au.init();
+        logLine(au.init() ? "audio ready" : "audio could not start");
         au.enabled = cfg.sound;
         {
             std::string base;
@@ -1833,6 +1885,7 @@ struct App {
                 b.push_back(music::battleTheme2());
                 titleTracks = t; battleTracks = b;
                 musicReady = true;
+                logLine("music ready: %d menu, %d battle tracks", (int)t.size(), (int)b.size());
             });
         }
         for (int i = 0; i < SDL_NumJoysticks(); ++i) openPad(i);
@@ -1859,7 +1912,16 @@ struct App {
         while (running) {
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
-                if (ev.type == SDL_QUIT) running = false;
+                if (ev.type == SDL_QUIT) { running = false; logLine("quit requested"); }
+                else if (ev.type == SDL_WINDOWEVENT) {
+                    static const char* names[] = {"none", "shown", "hidden", "exposed", "moved", "resized", "size changed",
+                                                  "minimized", "maximized", "restored", "mouse entered", "mouse left",
+                                                  "focus gained", "focus lost", "close", "take focus", "hit test", "icc profile", "display changed"};
+                    int we = ev.window.event;
+                    if (we != SDL_WINDOWEVENT_MOVED && we != SDL_WINDOWEVENT_ENTER && we != SDL_WINDOWEVENT_LEAVE)
+                        logLine("window %s (%d, %d)", we >= 0 && we < (int)(sizeof(names) / sizeof(names[0])) ? names[we] : "event",
+                                ev.window.data1, ev.window.data2);
+                }
                 else if (ev.type == SDL_CONTROLLERDEVICEADDED) openPad(ev.cdevice.which);
                 else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) closePad(ev.cdevice.which);
                 else if (ev.type == SDL_KEYDOWN && sc == SC_NAME) {
@@ -1885,6 +1947,15 @@ struct App {
             while (acc >= step && steps < 6) { t += step; tick(); acc -= step; ++steps; if (!running) break; }
             if (steps == 6) acc = 0;
             render();
+            {
+                static long frameCount = 0; static double nextBeat = 0;
+                ++frameCount;
+                if (frameCount == 1) logLine("first frame drawn");
+                if (now >= nextBeat && now < 60) {
+                    logLine("heartbeat: %ld frames, screen %d, window flags 0x%x", frameCount, (int)sc, SDL_GetWindowFlags(win));
+                    nextBeat = now + 5;
+                }
+            }
             if (!opt.shot.empty() && !shotDone && now >= opt.shotAt) { screenshot(opt.shot); shotDone = true; }
             if (!opt.captureFx.empty() && sc == SC_GAME) {
                 static int nWave = 0, nBang = 0; static double lastCap = 0;
@@ -1909,6 +1980,7 @@ struct App {
             }
             leaveMatch();
         }
+        logLine("shutting down");
         if (musicLoader.joinable()) musicLoader.join();
         au.shutdown();
         g.destroy();
